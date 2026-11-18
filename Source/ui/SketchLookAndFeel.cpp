@@ -95,6 +95,28 @@ void SketchLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int w
                                           float sliderPos, float, float,
                                           juce::Slider::SliderStyle style, juce::Slider& s)
 {
+    if (style == juce::Slider::LinearHorizontal)
+    {
+        // Horizontal fader (Destroy): track, filled part, cap.
+        const auto area = juce::Rectangle<float> ((float) x, (float) y, (float) width, (float) height);
+        const auto seed = seedOf (s.getName());
+        const float cy = area.getCentreY();
+        const auto track = juce::Rectangle<float> (area.getWidth() + 8.0f, 12.0f).withCentre ({ area.getCentreX(), cy });
+        g.setColour (colour::knob);
+        g.fillRoundedRectangle (track, 6.0f);
+        g.setColour (colour::accent.withAlpha (0.35f));
+        g.fillRoundedRectangle (track.withRight (juce::jmax (track.getX() + 6.0f, sliderPos)), 6.0f);
+        juce::Path t;
+        t.addRoundedRectangle (track, 6.0f);
+        stroke (g, t, 1.8f);
+        const auto cap = juce::Rectangle<float> (18.0f, 34.0f).withCentre ({ sliderPos, cy });
+        g.setColour (colour::ink);
+        g.fillRoundedRectangle (cap, 3.0f);
+        stroke (g, rectStroke (cap, seed + 9, 0.4f, 1.0f), 1.6f);
+        g.setColour (colour::accent);
+        g.fillRect (juce::Rectangle<float> (2.5f, cap.getHeight() * 0.6f).withCentre (cap.getCentre()));
+        return;
+    }
     if (style != juce::Slider::LinearVertical)
     {
         LookAndFeel_V4::drawLinearSlider (g, x, y, width, height, sliderPos, 0, 0, style, s);

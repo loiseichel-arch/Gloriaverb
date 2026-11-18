@@ -108,10 +108,10 @@ private:
 class SketchFader : public juce::Component
 {
 public:
-    explicit SketchFader (const juce::String& name, bool darkColumn = false)
+    explicit SketchFader (const juce::String& name, bool darkColumn = false, bool horizontal = false)
     {
         slider.setName (name);
-        slider.setSliderStyle (juce::Slider::LinearVertical);
+        slider.setSliderStyle (horizontal ? juce::Slider::LinearHorizontal : juce::Slider::LinearVertical);
         slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
         slider.getProperties().set ("dark", darkColumn);
         slider.setMouseDragSensitivity (200);
