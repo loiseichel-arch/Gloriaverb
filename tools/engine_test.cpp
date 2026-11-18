@@ -9,6 +9,7 @@
 #include "dsp/Modules.h"
 #include <chrono>
 #include <cstdio>
+#include <algorithm>
 #include <utility>
 #include <vector>
 #if defined(__x86_64__) || defined(_M_X64)
@@ -147,7 +148,8 @@ int main()
         pinkish (L, R, (size_t) (8 * fs));
         iL = L; iR = R;
         render (s, L, R);
-        const size_t a = L.size() / 2, b = L.size();
+        // Non-lin: a held sound only opens the gate once, so measure inside it
+        const size_t a = m == 4 ? (size_t) (0.3 * fs) : L.size() / 2, b = m == 4 ? (size_t) (1.9 * fs) : L.size();
         double cLR = 0; for (size_t i = a; i < b; ++i) cLR += (double) L[i] * R[i];
         const double eo = energy (L, a, b) + energy (R, a, b), ei = energy (iL, a, b) + energy (iR, a, b);
         const double lvl = 10 * std::log10 (eo / ei);
@@ -233,6 +235,25 @@ int main()
         check (std::fabs ((double) last / fs - 0.05 - t) < 0.06, "non-lin gate length");
     }
 
+    std::printf ("\n== Non-lin: Time counts from the attack (held note 1.5 s, then a second hit at 2.5 s) ==\n");
+    for (float t : { 0.4f, 1.0f })
+    {
+        Settings s = base (4, t);
+        std::vector<float> L ((size_t) (5 * fs), 0.0f), R (L.size(), 0.0f);
+        for (size_t i = 0; i < (size_t) (1.5 * fs); ++i)
+            L[i] = R[i] = 0.4f * (float) std::sin (2 * 3.14159265 * 220 * (double) i / fs) * std::exp (-(float) i / (float) (0.8 * fs));
+        for (size_t i = (size_t) (2.5 * fs); i < (size_t) (2.55 * fs); ++i)
+            L[i] = R[i] = 0.4f * (float) std::sin (2 * 3.14159265 * 220 * (double) i / fs);
+        std::vector<float> dryL = L;
+        render (s, L, R);
+        // the wet signal includes the dry note's diffusion: find where the tail stops after each hit
+        auto lastAbove = [&] (size_t from, size_t to) { size_t last = from; for (size_t i = from; i < to; ++i) if (std::fabs (L[i]) > 0.001f) last = i; return (double) last / fs; };
+        const double end1 = lastAbove (0, (size_t) (2.45 * fs)), end2 = lastAbove ((size_t) (2.45 * fs), L.size());
+        std::printf ("  Time %.1f s : first gate ends at %.3f s (note lasts 1.5 s), second at %.3f s (hit at 2.5 s)\n", t, end1, end2);
+        check (std::fabs (end1 - t) < 0.06, "non-lin: gate length from the attack");
+        check (std::fabs (end2 - 2.5 - t) < 0.06, "non-lin: retrigger");
+    }
+
     std::printf ("\n== Glorious: Gravity (Time 8 s): tail 1.5-3 s vs 0.1-0.5 s after a burst ==\n");
     for (float gr : { 1.0f, 0.0f, -1.0f })
     {
@@ -248,22 +269,66 @@ int main()
         if (gr == -1.0f) check (later > early, "gravity -100 swells");
     }
 
-    std::printf ("\n== Spring: chirp (lows arrive later than highs), Boiiing!! ==\n");
+    std::printf ("\n== Spring: chirp (lows arrive first, highs later, as in a real spring), Boiiing!! ==\n");
     for (float b : { 0.0f, 0.5f, 1.0f })
     {
         Settings s = base (6, 2.0f); s.boing = b;
         std::vector<float> L, R;
         impulse (s, 3.0, L, R);
-        auto lo = lowpass (L, 300), hi = highpass (L, 2500);
+        // narrow bands (RBJ band-pass, Q 4), centre of energy of the first pass (25-60 ms)
+        auto bandpass = [&] (const std::vector<float>& x, double f0)
+        {
+            const double w = 2 * 3.14159265 * f0 / fs, al = std::sin (w) / 8.0, a0 = 1 + al;
+            const double b0 = al / a0, b2 = -al / a0, a1 = -2 * std::cos (w) / a0, a2 = (1 - al) / a0;
+            std::vector<float> y (x.size()); double z1 = 0, z2 = 0;
+            for (size_t i = 0; i < x.size(); ++i) { const double o = b0 * x[i] + z1; z1 = -a1 * o + z2; z2 = b2 * x[i] - a2 * o; y[i] = (float) o; }
+            return y;
+        };
         auto centre = [&] (const std::vector<float>& x)
         {
             double e = 0, t = 0;
-            for (size_t i = 0; i < (size_t) (0.03 * fs); ++i) { e += x[i] * x[i]; t += (double) i * x[i] * x[i]; }
+            for (size_t i = (size_t) (0.025 * fs); i < (size_t) (0.060 * fs); ++i) { e += x[i] * x[i]; t += (double) i * x[i] * x[i]; }
             return t / std::max (1e-20, e) / fs * 1000.0;
         };
-        std::printf ("  Boiiing!! %3.0f%% : lows at %.1f ms, highs at %.1f ms, RT60 %.2f s\n", b * 100, centre (lo), centre (hi), rt60 (L, R));
-        if (b == 1.0f) check (centre (lo) > centre (hi) + 1.0, "spring chirp");
+        auto lo = bandpass (L, 300), hi = bandpass (L, 2200);
+        std::printf ("  Boiiing!! %3.0f%% : 300 Hz at %.1f ms, 2.2 kHz at %.1f ms, RT60 %.2f s\n", b * 100, centre (lo), centre (hi), rt60 (L, R));
+        // how "echoey": peak / mean of the energy in 5 ms windows, 60 ms .. 600 ms
+        std::vector<double> win;
+        for (size_t i = (size_t) (0.06 * fs); i + 240 < (size_t) (0.6 * fs); i += 240) win.push_back (energy (L, i, i + 240));
+        double mx = 0, mean = 0; for (double v : win) { mx = std::max (mx, v); mean += v; } mean /= (double) win.size();
+        std::printf ("      echo peak/mean (lower = smoother) %.1f\n", mx / mean);
+        check (centre (hi) > centre (lo) + 4.0, "spring chirp: highs arrive later");
     }
+
+    std::printf ("\n== Modulation: pitch swing of a 1 kHz tone through the reverb (Clean, Rate 0.6 Hz, wet only) ==\n");
+    for (int m : { 0, 3, 5 })
+        for (float dpt : { 0.0f, 0.3f, 1.0f })
+        {
+            Settings s = base (m, 3.0f); s.modDepth = dpt; s.modRateHz = 0.6f;
+            const size_t n = (size_t) (8 * fs);
+            std::vector<float> L (n), R (n);
+            for (size_t i = 0; i < n; ++i) L[i] = R[i] = 0.3f * (float) std::sin (2 * 3.14159265 * 1000.0 * (double) i / fs);
+            render (s, L, R);
+            // frequency per 40 ms window from zero crossings (after 3 s)
+            double fmin = 1e9, fmax = 0;
+            const size_t w = (size_t) (0.04 * fs);
+            for (size_t a = (size_t) (3 * fs); a + w < n; a += w)
+            {
+                int zc = 0; double first = -1, last = -1;
+                for (size_t i = a + 1; i < a + w; ++i)
+                    if (L[i - 1] < 0 && L[i] >= 0)
+                    {
+                        const double t = (double) (i - 1) + L[i - 1] / (L[i - 1] - L[i]);
+                        if (first < 0) first = t;
+                        last = t;
+                        ++zc;
+                    }
+                if (zc > 3) { const double f = (zc - 1) * fs / (last - first); fmin = std::min (fmin, f); fmax = std::max (fmax, f); }
+            }
+            const double cents = 1200.0 * std::log2 (fmax / fmin) / 2.0;
+            std::printf ("  %-9s Depth %3.0f%% : pitch swing about +/- %.0f cents\n", modeName (m), dpt * 100, cents);
+            if (dpt == 1.0f) check (cents > 25.0, "strong modulation at 100 %");
+        }
 
     std::printf ("\n== Mode changes while playing (every mode in turn): largest sample step ==\n");
     {
@@ -371,6 +436,19 @@ int main()
                 const double rl = std::sqrt (energy (L, i, i + win) / win), rr = std::sqrt (energy (R, i, i + win) / win);
                 const bool dl = rl < 0.106, dr = rr < 0.106;
                 dropsL += dl; dropsR += dr; both += dl && dr;
+            }
+            // count separate dropouts on the left (1 ms windows) and their median length
+            {
+                const size_t w1 = (size_t) (0.001 * fs);
+                int count = 0; std::vector<int> lens; int cur = 0;
+                for (size_t i = 0; i + w1 < n; i += w1)
+                {
+                    const bool d = std::sqrt (energy (L, i, i + w1) / w1) < 0.106;
+                    if (d) ++cur; else if (cur > 0) { lens.push_back (cur); ++count; cur = 0; }
+                }
+                std::sort (lens.begin(), lens.end());
+                if (amt > 0.0f)
+                    std::printf ("      %4.1f dropouts per second, median %d ms\n", count / 20.0, lens.empty() ? 0 : lens[lens.size() / 2]);
             }
             std::printf ("  Destroy %3.0f%%, Width %3.0f%% : dropped %4.1f%% of the time (L), %4.1f%% (R), together in %3.0f%% of drops\n",
                          amt * 100, w * 100, 100.0 * dropsL / (double) (n / win), 100.0 * dropsR / (double) (n / win), dropsL ? 100.0 * both / dropsL : 0.0);

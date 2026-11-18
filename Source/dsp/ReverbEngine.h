@@ -60,7 +60,7 @@ struct ModeDesign
     std::array<float, 8>  erMsL, erMsR, erGain;
     float crossoverHz;                 // split between the two decay bands
     float lowMul, highMul;             // natural decay of lows / highs vs Time
-    float modMs;                       // delay swing at Mod Depth 100 %
+    float modMs;                       // (unused since 0.3: modulation has one scale for every mode)
     float modRateMul;                  // LFO speed vs Mod Rate
     float lateGain;                    // output level of the tail
 };
@@ -136,27 +136,37 @@ inline const ModeDesign& designFor (int mode)
 }
 
 // ---------------------------------------------------------------------------
-// Spring tank: three springs (left, right, centre). Each spring is a loop
-// made of a delay and a chain of dispersive allpasses, so every pass smears
-// the sound into the typical chirp. A separate "drip" chain on the input
-// gives the boing on attacks (Boiiing!!).
+// Spring tank, after the RE-201 Space Echo spring: dark, twangy, no wobble.
+// Three springs (left, right, centre) in parallel. Each spring is a loop:
+// delay line -> cascade of 100 stretched allpasses (a + z^-k) / (1 + a z^-k)
+// -> lowpass below the chirp frequency -> back into the delay. In a real
+// spring the lows travel faster than the highs, so every echo is a chirp
+// and each pass smears it further: that is what turns the echoes into the
+// "boing" instead of distinct repeats (Valimaki / Parker / Abel model).
+// A small tube-like preamp drives the tank; Boiiing!! pushes the attacks
+// into the springs and makes the chirps stronger.
 
 class SpringTank
 {
 public:
-    static constexpr int S = 3, stages = 40, dripStages = 64;
+    static constexpr int S = 3, M = 100, maxK = 16;
 
     void prepare (double sampleRate)
     {
         fs = sampleRate;
-        const float ms[S] = { 33.1f, 39.7f, 45.9f };
+        k = std::clamp ((int) std::lround (fs / (2.0 * 3000.0)), 2, maxK);   // chirps up to about 3 kHz (a dark tank)
+        const double fc = fs / (2.0 * k);
+        const float ms[S] = { 27.3f, 31.9f, 36.7f };
         for (int s = 0; s < S; ++s)
         {
-            loop[s].setMaxSamples ((int) (0.060 * fs) + 64);
+            loop[s].setMaxSamples ((int) (0.050 * fs) + 64);
             len[s] = (float) (ms[s] * 0.001 * fs);
+            for (int b = 0; b < 2; ++b) lpf[s][b].setLowpass (fs, fc * 0.85, b == 0 ? 0.5412 : 1.3066);   // 4th-order Butterworth
         }
-        lpCoef = onePoleCoef (fs, 4500.0);
-        hpCoef = onePoleCoef (fs, 70.0);
+        hpCoef = onePoleCoef (fs, 110.0);
+        emphCoef = onePoleCoef (fs, 1500.0);
+        toneLp[0].setLowpass (fs, 3500.0);   // the RE-201 tank is dark
+        toneLp[1].setLowpass (fs, 3500.0);
         reset();
     }
 
@@ -165,62 +175,93 @@ public:
         for (int s = 0; s < S; ++s)
         {
             loop[s].clear();
-            for (auto& a : chain[s]) a.z = 0.0f;
-            lp[s] = hp[s] = 0.0f;
+            for (int m = 0; m < M; ++m) for (int j = 0; j < maxK; ++j) xb[s][m][j] = yb[s][m][j] = 0.0f;
+            for (auto& f : lpf[s]) f.reset();
+            hp1[s] = hp2[s] = 0.0f;
         }
-        for (auto& c : drip) for (auto& a : c) a.z = 0.0f;
-        phase = 0.0f;
+        toneLp[0].reset(); toneLp[1].reset();
+        emph[0] = emph[1] = 0.0f;
+        p = 0;
+        wob = wobTarget = 0.0f;
     }
 
     void set (float timeS, float boing, float damping, float modDepth, float modRate)
     {
+        const float b = std::clamp (boing, 0.0f, 1.0f);
+        a = 0.55f + 0.20f * b;                                   // more dispersion = longer chirps
+        const float dcDelay = (float) (k * M) * (1.0f - a) / (1.0f + a);
         const float t = std::clamp (timeS, 0.1f, 60.0f);
-        apCoef = -(0.45f + 0.30f * std::clamp (boing, 0.0f, 1.0f));
         for (int s = 0; s < S; ++s)
-        {
-            // the dispersive chain adds its low-frequency delay to the loop
-            const float loopLen = len[s] + (float) stages * (1.0f - apCoef) / (1.0f + apCoef);
-            g[s] = std::min (0.9995f, (float) std::exp (-6.907755 * loopLen / (t * fs)));
-        }
-        dripLevel = 0.9f * std::clamp (boing, 0.0f, 1.0f);
-        lpCoef = onePoleCoef (fs, 4500.0 * std::pow (2.0, 0.8 * std::clamp (damping, -1.0f, 1.0f)));
-        modSamples = std::clamp (modDepth, 0.0f, 1.0f) * (float) (0.0012 * fs);
-        modInc = std::clamp (modRate, 0.02f, 10.0f) * 0.7f / (float) fs;
+            g[s] = std::min (0.9995f, (float) std::exp (-6.907755 * (len[s] + dcDelay) / (t * fs)));
+        drive = 1.0f + 1.5f * b;                                 // attacks hit the springs harder
+        emphAmt = 2.5f * b;
+        const double fc = fs / (2.0 * k);
+        const double lp = std::clamp (fc * 0.85 * std::pow (2.0, 0.5 * std::clamp (damping, -1.0f, 1.0f)), 800.0, std::min (0.95 * fc, 0.45 * fs));
+        for (int s = 0; s < S; ++s)
+            for (int i = 0; i < 2; ++i) lpf[s][i].setLowpass (fs, lp, i == 0 ? 0.5412 : 1.3066);
+        // springs hardly move: the Mod knobs only shake the tank a little
+        wobDepth = std::clamp (modDepth, 0.0f, 1.0f) * (float) (0.0002 * fs);
+        wobRate = std::clamp (modRate, 0.02f, 10.0f);
     }
 
     void process (float inL, float inR, float& outL, float& outR)
     {
-        phase += modInc;
-        if (phase >= 1.0f) phase -= 1.0f;
-        const float in[S] = { inL, inR, 0.5f * (inL + inR) };
+        // preamp: a little drive, then emphasis of the attacks (Boiiing!!)
+        float x[2] = { inL, inR };
+        for (int c = 0; c < 2; ++c)
+        {
+            emph[c] += emphCoef * (x[c] - emph[c]);
+            const float hi = x[c] - emph[c];
+            x[c] = std::tanh (drive * (x[c] + emphAmt * hi)) / drive;
+        }
+        const float in[S] = { x[0], x[1], 0.5f * (x[0] + x[1]) };
+
+        // tiny, smooth random shake of the tank
+        if (wobDepth > 0.0f)
+        {
+            wobPhase += wobRate / (float) fs;
+            if (wobPhase >= 1.0f) { wobPhase -= 1.0f; wobTarget = rng.bipolar(); }
+            wob += 0.0005f * (wobTarget - wob);
+        }
+
         float y[S];
         for (int s = 0; s < S; ++s)
         {
-            const float m = modSamples * (1.0f + std::sin (2.0f * pi * (phase + 0.33f * (float) s)));
-            float v = loop[s].tapFrac (std::max (3.0f, len[s] - m));
-            for (auto& ap : chain[s]) v = ap.process (v, apCoef);
-            lp[s] += lpCoef * (v - lp[s]);          // springs are dark
-            hp[s] += hpCoef * (lp[s] - hp[s]);      // and have no deep lows
-            y[s] = lp[s] - hp[s];
-            loop[s].push (in[s] * 0.6f + g[s] * y[s]);
+            const float d = std::max (3.0f, len[s] - wobDepth * (1.0f + wob * (s == 1 ? -1.0f : 1.0f)));
+            float v = loop[s].tapFrac (d);
+            for (int m = 0; m < M; ++m)
+            {
+                float& xk = xb[s][m][p];
+                float& yk = yb[s][m][p];
+                const float out = a * (v - yk) + xk;
+                xk = v;
+                yk = out;
+                v = out;
+            }
+            v = lpf[s][1].process (lpf[s][0].process (v));
+            hp1[s] += hpCoef * (v - hp1[s]);
+            v -= hp1[s];
+            hp2[s] += hpCoef * (v - hp2[s]);
+            v -= hp2[s];
+            y[s] = v;
+            loop[s].push (0.5f * in[s] + g[s] * v);
         }
+        p = (p + 1) % k;
 
-        float dl = inL, dr = inR;
-        for (auto& ap : drip[0]) dl = ap.process (dl, -0.82f);
-        for (auto& ap : drip[1]) dr = ap.process (dr, -0.80f);
-
-        outL = 0.9f * (y[0] + 0.55f * y[2]) + dripLevel * 0.5f * dl;
-        outR = 0.9f * (y[1] - 0.55f * y[2]) + dripLevel * 0.5f * dr;
+        outL = toneLp[0].process (y[0] + 0.6f * y[2]);
+        outR = toneLp[1].process (y[1] - 0.6f * y[2]);
     }
 
 private:
     double fs = 48000.0;
+    int k = 6, p = 0;
     DelayLine loop[S];
-    Allpass1 chain[S][stages];
-    Allpass1 drip[2][dripStages];
-    float len[S] {}, g[S] {}, lp[S] {}, hp[S] {};
-    float apCoef = -0.6f, dripLevel = 0.45f, lpCoef = 0.4f, hpCoef = 0.01f;
-    float modSamples = 0.0f, modInc = 0.0f, phase = 0.0f;
+    float xb[S][M][maxK] {}, yb[S][M][maxK] {};
+    Biquad lpf[S][2], toneLp[2];
+    float len[S] {}, g[S] {}, hp1[S] {}, hp2[S] {};
+    float a = 0.6f, drive = 1.0f, emphAmt = 0.0f, emph[2] {}, emphCoef = 0.1f, hpCoef = 0.01f;
+    float wob = 0.0f, wobTarget = 0.0f, wobPhase = 0.0f, wobDepth = 0.0f, wobRate = 0.6f;
+    Rng rng { 0x5EED5u };
 };
 
 // ---------------------------------------------------------------------------
@@ -242,13 +283,15 @@ public:
             for (auto& a : diff[s]) a.d.setMaxSamples ((int) (0.020 * fs) + 8);
         }
         spring.prepare (fs);
+        for (auto& v : vib) v.setMaxSamples ((int) (0.020 * fs) + 16);
+        modSmooth = 1.0f - timeCoef (fs, 0.03);
         adc.prepare (fs);
         dac.prepare (fs);
         keyFast.set (fs, 0.001, 0.030);
         gateKey.set (fs, 0.0005, 0.005);
         keySlow.set (fs, 0.050, 0.400);
         gateAtt = 1.0f - timeCoef (fs, 0.001);
-        gateRel = 1.0f - timeCoef (fs, 0.012);
+        gateRel = 1.0f - timeCoef (fs, 0.005);
         predelaySmooth = timeCoef (fs, 0.050);
         fadeStep = (float) (1.0 / (0.020 * fs));
 
@@ -272,6 +315,10 @@ public:
         }
         std::fill (std::begin (damp), std::end (damp), 0.0f);
         spring.reset();
+        vib[0].clear(); vib[1].clear();
+        for (int k = 0; k < N; ++k) modA[k] = modAT[k];
+        vibA = vibAT;
+        gateArmed = true; gateRearm = 0.0f;
         adc.reset(); dac.reset();
         keyFast.env = keySlow.env = gateKey.env = 0.0f;
         gateHold = 0.0f; gate = 0.0f; swell = 1.0f;
@@ -356,7 +403,8 @@ public:
                 float s[N];
                 for (int k = 0; k < N; ++k)
                 {
-                    const float d = baseLen[k] - modSamples * (1.0f + nextLfo (k));   // 0 .. 2 x swing below base
+                    modA[k] += modSmooth * (modAT[k] - modA[k]);
+                    const float d = baseLen[k] - modA[k] * (1.0f + nextLfo (k));   // swings 0 .. 2 x modA below the base length
                     s[k] = lines[k].tapFrac (d);
                 }
 
@@ -401,14 +449,37 @@ public:
                 // ---- Non-lin: gate (open while there is sound, then Time, then shut) ----
                 if (isNonLin)
                 {
-                    const float key = gateKey.process (std::max (std::fabs (pl), std::fabs (pr)));
-                    if (key > 0.0056f) gateHold = gateLen;           // about -45 dBFS
+                    // each attack opens the gate for exactly Time, however long the note
+                    const float a = std::max (std::fabs (pl), std::fabs (pr));
+                    const float f = gateKey.process (a), sl = keySlow.process (a);
+                    if (gateArmed && f > 0.0056f && f > 2.0f * sl + 0.001f)   // attack above about -45 dBFS
+                    {
+                        gateHold = gateLen;
+                        gateArmed = false;
+                        gateRearm = (float) (0.040 * fs);
+                    }
                     else if (gateHold > 0.0f) gateHold -= 1.0f;
+                    if (! gateArmed && (gateRearm -= 1.0f) <= 0.0f && f < 1.3f * sl + 0.001f) gateArmed = true;
                     const float target = gateHold > 0.0f ? 1.0f : 0.0f;
                     gate += (target > gate ? gateAtt : gateRel) * (target - gate);
                     wl *= gate;
                     wr *= gate;
                 }
+            }
+
+            // ---- modulation of the whole tail (the "sea-sick" part of Mod Depth) ----
+            vibA += modSmooth * (vibAT - vibA);
+            vib[0].push (wl);
+            vib[1].push (wr);
+            if (vibA > 0.01f || vibAT > 0.0f)
+            {
+                wl = vib[0].tapFrac (2.0f + vibA * (1.0f + nextLfo (N)));
+                wr = vib[1].tapFrac (2.0f + vibA * (1.0f + nextLfo (N + 1)));
+            }
+            else
+            {
+                wl = vib[0].tapFrac (2.0f);
+                wr = vib[1].tapFrac (2.0f);
             }
 
             // ---- era: output stage ----
@@ -486,10 +557,10 @@ private:
         dampCoef = onePoleCoef (fs, md.crossoverHz);
         lateGain = md.lateGain;
 
-        for (int k = 0; k < N; ++k)
+        for (int k = 0; k < N + 2; ++k)
         {
             lfoPhase[k] = (float) k / (float) N;
-            lfoSpread[k] = 0.80f + 0.45f * (float) ((k * 7) % N) / (float) N;
+            lfoSpread[k] = k >= N ? (k == N ? 1.0f : 1.07f) : 0.80f + 0.45f * (float) ((k * 7) % N) / (float) N;
             rndA[k] = rndB[k] = 0.0f;
             jitPhase[k] = jitA[k] = jitB[k] = 0.0f;
         }
@@ -527,8 +598,23 @@ private:
         if (force) predelayCur = predelayTarget;
         const bool hasEarly = ! isGlorious && current != (int) Mode::spring;
         earlyGain = hasEarly ? std::clamp (s.early, 0.0f, 1.0f) : 0.0f;
-        modSamples = (float) (std::clamp (s.modDepth, 0.0f, 1.0f) * md.modMs * 0.001 * fs * 0.5);
+        // Modulation, same scale in every mode. Inside the tank each line swings
+        // by up to 4 ms (less in small rooms, and capped so the pitch never
+        // runs away at high rates); on top, the whole tail gets a vibrato that
+        // grows with the square of Depth: 30 % = a clear chorus, 100 % = sea-sick.
         modRate = std::clamp (s.modRateHz, 0.02f, 10.0f) * md.modRateMul;
+        const float depth = std::clamp (s.modDepth, 0.0f, 1.0f);
+        const float w = 2.0f * pi * modRate;
+        const float loopAmp = std::min (0.004f, 0.06f / w);
+        // (short lines are passed through more often, so they swing less)
+        const float depthCurve = depth * std::sqrt (depth);
+        for (int k = 0; k < N; ++k)
+        {
+            const float lenFactor = std::sqrt (std::min (1.0f, baseLen[k] / (0.030f * (float) fs)));
+            modAT[k] = depthCurve * lenFactor * std::min (loopAmp * (float) fs, 0.4f * baseLen[k]);
+        }
+        vibAT = depth * depth * std::min (0.007f, 0.09f / w) * (float) fs;
+        if (force) { for (int k = 0; k < N; ++k) modA[k] = modAT[k]; vibA = vibAT; }
         width = std::clamp (s.width, 0.0f, 1.5f);
         widthGain = std::sqrt (2.0f / (1.0f + width * width));   // decorrelated sides: keep the loudness
 
@@ -541,7 +627,7 @@ private:
         swellRate = 1.0f - timeCoef (fs, swellTime);
 
         if (current == (int) Mode::spring)
-            spring.set (std::min (60.0f, t * 1.4f), s.boing, d, s.modDepth, s.modRateHz);   // the spring filters shorten the tail: compensate
+            spring.set (std::min (60.0f, t * 1.2f), s.boing, d, s.modDepth, s.modRateHz);   // the tank filters shorten the tail a little: compensate
 
         filtersOnTarget = s.filtersOn;
         loCutOn = s.loCutHz > 20.5f;
@@ -631,12 +717,16 @@ private:
     float erTapL[8] {}, erTapR[8] {}, erG[8] {};
     float predelayCur = 0.0f, predelayTarget = 0.0f, predelaySmooth = 0.999f;
 
-    float lfoPhase[N] {}, lfoSpread[N] {}, rndA[N] {}, rndB[N] {}, jitPhase[N] {}, jitA[N] {}, jitB[N] {};
-    float modSamples = 0.0f, modRate = 0.6f;
+    // LFOs: one per line, plus two for the vibrato of the tail
+    float lfoPhase[N + 2] {}, lfoSpread[N + 2] {}, rndA[N + 2] {}, rndB[N + 2] {}, jitPhase[N + 2] {}, jitA[N + 2] {}, jitB[N + 2] {};
+    float modA[N] {}, modAT[N] {}, modSmooth = 0.001f, modRate = 0.6f;
+    DelayLine vib[2];
+    float vibA = 0.0f, vibAT = 0.0f;
 
     // Non-lin gate, Glorious gravity
     EnvFollower keyFast, keySlow, gateKey;
-    float gateLen = 0.0f, gateHold = 0.0f, gate = 0.0f, gateAtt = 0.1f, gateRel = 0.01f;
+    float gateLen = 0.0f, gateHold = 0.0f, gate = 0.0f, gateAtt = 0.1f, gateRel = 0.01f, gateRearm = 0.0f;
+    bool gateArmed = true;
     float swell = 1.0f, swellRate = 0.001f, swellPower = 0.0f, swellDepth = 0.0f;
 
     Biquad inLp[2], outLp[2];

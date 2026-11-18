@@ -247,11 +247,12 @@ private:
 };
 
 // ===========================================================================
-// Destroy: worn-cassette dropouts on the whole signal. Each dropout pulls
-// the level down, closes the highs and slows the "tape" a little, then it
-// recovers. More Destroy = more frequent, deeper and longer dropouts.
-// Width sets how often both sides drop together (0 = always, 100 % = about
-// half the time, 150 % = independent).
+// Destroy: worn-cassette dropouts on the whole signal, fast and crackly.
+// Each dropout cuts the level in 1 ms, often comes in bursts, closes the
+// highs and slows the "tape" a hair, then comes back in 2 ms. More Destroy =
+// more frequent (up to about 25 per second), deeper and a bit longer
+// (3 to 40 ms). Width sets how often both sides drop together (0 = always,
+// 100 % = about half the time, 150 % = independent).
 
 class Destroyer
 {
@@ -260,8 +261,8 @@ public:
     {
         fs = sampleRate;
         for (auto& b : buf) b.assign (1024, 0.0f);
-        att = 1.0f - timeCoef (fs, 0.004);
-        rel = 1.0f - timeCoef (fs, 0.035);
+        att = 1.0f - timeCoef (fs, 0.001);
+        rel = 1.0f - timeCoef (fs, 0.002);
         reset();
     }
 
@@ -269,6 +270,8 @@ public:
     {
         for (int c = 0; c < 2; ++c) { g[c] = tg[c] = 1.0f; left[c] = 0; lp[c] = 0.0f; std::fill (buf[c].begin(), buf[c].end(), 0.0f); }
         w = 0;
+        burst = 0;
+        burstWait = 0;
     }
 
     void set (float amount, float widthSetting)
@@ -276,7 +279,7 @@ public:
         const float a = std::clamp (amount, 0.0f, 1.0f);
         if (a <= 0.0f && amt > 0.0f) reset();
         amt = a;
-        rate = 0.15f + 3.85f * a * a;                                       // dropouts per second
+        rate = 0.5f + 24.5f * a * std::sqrt (a);                            // dropouts per second
         const float wd = std::clamp (widthSetting, 0.0f, 1.5f);
         together = wd <= 1.0f ? 1.0f - 0.5f * wd : 1.5f - wd;               // 1 .. 0.5 .. 0
     }
@@ -288,18 +291,26 @@ public:
         const float p = rate / (float) fs;
         for (int i = 0; i < n; ++i)
         {
-            if (rng.uniform() < p)
+            bool fire = rng.uniform() < p;
+            if (burst > 0 && --burstWait <= 0) { fire = true; --burst; }
+            if (fire)
             {
                 const bool both = rng.uniform() < together;
                 const int first = rng.uniform() < 0.5f ? 0 : 1;
-                const float depthDb = (6.0f + 34.0f * amt) * (0.4f + 0.6f * rng.uniform());
-                const int length = (int) ((0.015f + 0.235f * amt * rng.uniform()) * (float) fs);
+                const float depthDb = (8.0f + 34.0f * amt) * (0.5f + 0.5f * rng.uniform());
+                const float u = rng.uniform();
+                const int length = (int) ((0.003f + 0.037f * u * u * (0.4f + 0.6f * amt)) * (float) fs);
                 for (int c = 0; c < 2; ++c)
                 {
                     if (! both && c != first) continue;
                     tg[c] = std::pow (10.0f, -depthDb / 20.0f);
                     left[c] = length;
                 }
+                // crackles come in bursts: sometimes a few more right after
+                if (burst == 0 && rng.uniform() < 0.25f + 0.45f * amt)
+                    burst = 1 + (int) (rng.uniform() * (1.0f + 4.0f * amt));
+                if (burst > 0)
+                    burstWait = length + (int) ((0.004f + 0.030f * rng.uniform()) * (float) fs);
             }
 
             w = (w + 1) & 1023;
@@ -308,13 +319,13 @@ public:
                 if (left[c] > 0 && --left[c] == 0) tg[c] = 1.0f;
                 g[c] += (tg[c] < g[c] ? att : rel) * (tg[c] - g[c]);
 
-                // tape slows a little in the dropout: read slightly later
+                // tape slows a hair in the dropout: read slightly later
                 buf[c][(size_t) w] = io[c][i];
-                const float d = (1.0f - g[c]) * 0.0008f * (float) fs;
+                const float d = (1.0f - g[c]) * 0.0003f * (float) fs;
                 const int di = (int) d;
                 const float f = d - (float) di;
                 const float a0 = buf[c][(size_t) ((w - di) & 1023)], a1 = buf[c][(size_t) ((w - di - 1) & 1023)];
-                float y = a0 + f * (a1 - a0);
+                const float y = a0 + f * (a1 - a0);
 
                 // highs close with the level
                 const float fc = 1500.0f + 18500.0f * g[c] * g[c];
@@ -329,7 +340,7 @@ private:
     struct Uni { uint32_t s = 0x9E3779B9u; float uniform() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return (float) (s >> 8) * (1.0f / 16777216.0f); } };
     double fs = 48000.0;
     std::vector<float> buf[2];
-    int w = 0;
+    int w = 0, burst = 0, burstWait = 0;
     float amt = 0.0f, rate = 0.0f, together = 0.5f;
     float g[2] { 1.0f, 1.0f }, tg[2] { 1.0f, 1.0f }, lp[2] {}, att = 0.01f, rel = 0.001f;
     int left[2] {};
