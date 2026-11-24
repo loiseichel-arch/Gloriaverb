@@ -6,7 +6,7 @@ cmake_minimum_required (VERSION 3.22)
 set (CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "")
 set (CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
 
-project (Gloriaverb VERSION 0.4.0 LANGUAGES C CXX)
+project (Gloriaverb VERSION 0.5.0 LANGUAGES C CXX)
 
 set (CMAKE_CXX_STANDARD 17)
 set (CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -111,7 +111,7 @@ if (GLORIAVERB_TESTS AND UNIX AND NOT APPLE)
     target_sources (ui_snapshot PRIVATE tools/ui_snapshot.cpp Source/PluginProcessor.cpp
                     Source/PluginEditor.cpp Source/ui/SketchLookAndFeel.cpp)
     target_include_directories (ui_snapshot PRIVATE Source)
-    target_compile_definitions (ui_snapshot PRIVATE JucePlugin_Name="Gloriaverb" JUCE_ALSA=0 JUCE_JACK=0
+    target_compile_definitions (ui_snapshot PRIVATE JucePlugin_Name="Gloriaverb" JucePlugin_VersionString="0.5.0" JUCE_ALSA=0 JUCE_JACK=0
                                 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 GLORIAVERB_HAS_FONTS=1)
     target_link_libraries (ui_snapshot PRIVATE GloriaverbAssets juce::juce_audio_utils juce::juce_dsp
                            juce::juce_recommended_config_flags)

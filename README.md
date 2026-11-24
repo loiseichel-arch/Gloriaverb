@@ -1,4 +1,4 @@
-# Gloriaverb v0.4
+# Gloriaverb v0.5
 
 Réverb multi-effet de **Planet Gloria** (AAX pour Pro Tools, plus AU, VST3 et une app autonome pour tester), écrite avec JUCE. Même famille visuelle que Malade et Slapdash : interface dessinée à la main.
 
@@ -11,6 +11,7 @@ Algorithmique, sauf deux modes faits par convolution d'enregistrements de Loïs 
   - Le bouton rond **on / off** allume ou éteint le module (fondu de 10 ms, sans clic). Alt + clic : valeur par défaut.
   - **Glisser** un module à gauche ou à droite change l'ordre (6 ordres possibles, en série). Le changement fait un court fondu de la sortie (10 ms + 10 ms).
   - À l'ouverture : Reverb seule allumée.
+- **Presets** en haut : nom du preset, flèches ‹ › pour passer au suivant, clic sur le nom pour la liste, **Save**, **Delete**. **Init** = tous les réglages par défaut. Un astérisque * s'affiche quand un réglage a bougé depuis le chargement. Un preset rappelle **tout** (ordre des modules, Delay, Reverb, EQ, Master) sauf le bouton on. Les presets sont des fichiers dans `Documents/Planet Gloria/Gloriaverb/Presets` (sous-dossiers possibles : enregistrer « Drums/Snare » crée le dossier Drums) ; « Open presets folder » dans la liste ouvre ce dossier.
 - **on** en haut à droite : bypass de tout le plugin. **Arrêt net** : fondu de 5 ms, puis les queues de réverb et de delay sont effacées ; on entend le signal propre. La fenêtre s'estompe. En rallumant, tout repart à zéro.
 - **Master en bas**, toujours en fin de chaîne : Duck, Release, Destroy, Output.
 - **Alt + clic** (ou double-clic) sur n'importe quel réglage : retour à la valeur par défaut.

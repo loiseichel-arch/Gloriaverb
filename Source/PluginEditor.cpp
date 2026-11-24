@@ -11,7 +11,7 @@ namespace
 }
 
 GloriaverbEditor::GloriaverbEditor (GloriaverbProcessor& p)
-    : AudioProcessorEditor (p), proc (p), synoptic (p.apvts),
+    : AudioProcessorEditor (p), proc (p), synoptic (p.apvts), presetBar (p.presets),
       eqCurve (p.apvts, [&p] (double hz) { return p.eqMagnitude (hz); })
 {
     setLookAndFeel (&lnf);
@@ -26,6 +26,7 @@ GloriaverbEditor::GloriaverbEditor (GloriaverbProcessor& p)
     onSwitch.attach (st, id::active);
     onSwitch.setTooltip ("plugin on / bypass: off stops everything at once, tails included (alt-click to reset)");
     addAndMakeVisible (onSwitch);
+    addAndMakeVisible (presetBar);
 
     // ---- Reverb ----
     modeSel = std::make_unique<ChoiceSelector> (*st.getParameter (id::mode), modeNames());
@@ -228,6 +229,7 @@ void GloriaverbEditor::resized()
 {
     synoptic.setBounds (synArea);
     onSwitch.setBounds (W - 22 - 80, 38, 80, 30);
+    presetBar.setBounds (318, 24, 470, 32);
 
     // ---- Reverb ----
     const int px = panelArea.getX() + 16, py = panelArea.getY() + 12;

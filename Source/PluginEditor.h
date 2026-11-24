@@ -6,6 +6,7 @@
 #include "ui/SketchLookAndFeel.h"
 #include "ui/Synoptic.h"
 #include "ui/EqCurve.h"
+#include "ui/PresetBar.h"
 
 // The window: synoptic at the top (Delay / Reverb / EQ, drag to reorder),
 // the panel of the selected module, and the Master strip at the bottom.
@@ -43,6 +44,7 @@ private:
     int panel = 1;   // 0 Delay, 1 Reverb, 2 EQ
     Synoptic synoptic;
     ResetToggle onSwitch { "on", true };   // the whole plugin on / bypass
+    PresetBar presetBar;
     bool shownOn = true;
 
     // ---- Reverb ----

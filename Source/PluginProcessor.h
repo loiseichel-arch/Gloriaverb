@@ -7,6 +7,7 @@
 #include "dsp/ReverbEngine.h"
 #include "dsp/Modules.h"
 #include "Parameters.h"
+#include "PresetManager.h"
 
 class GloriaverbProcessor : public juce::AudioProcessor
 {
@@ -39,6 +40,7 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     juce::AudioProcessorValueTreeState apvts;
+    PresetManager presets { apvts, "Gloriaverb", { params::id::active } };   // a preset recalls everything but "on"
 
     // For the EQ curve in the window (message thread).
     double eqMagnitude (double hz) const;

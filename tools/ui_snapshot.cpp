@@ -118,6 +118,32 @@ int main (int argc, char** argv)
         ok = ok && before > 0.001f && afterOff == 0.0f && diff == 0.0f && afterOn == 0.0f;
     }
 
+    // Presets: save, change, see "modified", load back, Init, delete. "on" is never recalled.
+    {
+        GloriaverbProcessor pr;
+        auto& pm = pr.presets;
+        const auto f = pm.fileFor ("Test folder/Snare room");
+        f.deleteFile();
+        set (pr, params::id::mode, 3); set (pr, params::id::time, 0.8f); set (pr, params::id::order, 4); set (pr, params::id::dMix, 60);
+        const bool saved = pm.save ("Test folder/Snare room");
+        const bool cleanAfterSave = ! pm.isModified();
+        set (pr, params::id::time, 5.0f); set (pr, params::id::active, 0);
+        const bool modified = pm.isModified();
+        auto val = [&] (const char* id) { auto* q = pr.apvts.getParameter (id); return q->convertFrom0to1 (q->getValue()); };
+        const bool loaded = pm.load (f);
+        const bool recalled = std::abs (val (params::id::time) - 0.8f) < 0.01f && juce::roundToInt (val (params::id::mode)) == 3
+                           && juce::roundToInt (val (params::id::order)) == 4 && std::abs (val (params::id::dMix) - 60.0f) < 0.1f;
+        const bool onKept = val (params::id::active) < 0.5f;
+        pm.loadInit();
+        const bool init = juce::roundToInt (val (params::id::mode)) == 1 && std::abs (val (params::id::time) - 2.0f) < 0.01f && ! pm.isModified();
+        pm.load (f);
+        const bool listed = pm.list().contains (f) && pm.currentName() == "Test folder/Snare room";
+        const bool deleted = pm.deleteCurrent() && ! f.existsAsFile() && ! f.getParentDirectory().exists();
+        std::printf ("presets: saved %d, clean after save %d, modified %d, loaded %d, recalled %d, on left alone %d, init %d, listed %d, deleted %d\n",
+                     saved, cleanAfterSave, modified, loaded, recalled, onKept, init, listed, deleted);
+        ok = ok && saved && cleanAfterSave && modified && loaded && recalled && onKept && init && listed && deleted;
+    }
+
     // pictures: defaults of each panel, then a few values moved
     GloriaverbProcessor q;
     q.setPlayConfigDetails (2, 2, 48000.0, 512);
@@ -140,6 +166,14 @@ int main (int argc, char** argv)
         q.apvts.state.setProperty ("panel", panel, nullptr);
         std::unique_ptr<juce::AudioProcessorEditor> ed (q.createEditor());
         save (*ed, out + "/gv_" + names[panel] + "_changed.png");
+    }
+    // the Save question over the window
+    {
+        std::unique_ptr<juce::AudioProcessorEditor> ed (q.createEditor());
+        for (auto* c : ed->getChildren())
+            if (auto* bar = dynamic_cast<PresetBar*> (c))
+                if (auto* b = dynamic_cast<juce::Button*> (bar->getChildComponent (3))) b->onClick();
+        save (*ed, out + "/gv_preset_save.png");
     }
     // Vintage Chamber with Time above the recording, then bypassed
     set (q, params::id::mode, 7); set (q, params::id::time, 10.0f);
