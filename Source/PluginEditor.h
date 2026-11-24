@@ -16,6 +16,7 @@ public:
     ~GloriaverbEditor() override;
 
     void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override;
     void resized() override;
 
 private:
@@ -31,7 +32,7 @@ private:
     void paintEq (juce::Graphics&);
     void paintMaster (juce::Graphics&);
     void drawFader (juce::Graphics&, SketchFader&, const juce::String& label,
-                    std::initializer_list<std::pair<float, const char*>> ticks);
+                    std::initializer_list<std::pair<float, const char*>> ticks, const juce::String& shown = {});
     void valuePill (juce::Graphics&, const juce::String& text, juce::Point<float> centre, uint32_t seed);
 
     GloriaverbProcessor& proc;
@@ -41,11 +42,13 @@ private:
 
     int panel = 1;   // 0 Delay, 1 Reverb, 2 EQ
     Synoptic synoptic;
+    ResetToggle onSwitch { "on", true };   // the whole plugin on / bypass
+    bool shownOn = true;
 
     // ---- Reverb ----
     std::unique_ptr<ChoiceSelector> modeSel, eraSel;
     SketchFader timeFader { "Time" }, predelayFader { "Predelay" }, earlyFader { "Early Ref" },
-                gravityFader { "Gravity" }, boingFader { "Boiiing!!" };
+                gravityFader { "Gravity" };
     SketchKnob depth { "Depth", 56 }, rate { "Rate", 56 },
                loCut { "Lo Cut", 56 }, hiCut { "Hi Cut", 56 },
                damping { "Damping", 56 }, width { "Width", 56 }, mix { "Mix", 56 };

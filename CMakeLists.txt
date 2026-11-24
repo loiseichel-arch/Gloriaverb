@@ -6,7 +6,7 @@ cmake_minimum_required (VERSION 3.22)
 set (CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "")
 set (CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
 
-project (Gloriaverb VERSION 0.3.0 LANGUAGES C CXX)
+project (Gloriaverb VERSION 0.4.0 LANGUAGES C CXX)
 
 set (CMAKE_CXX_STANDARD 17)
 set (CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -69,9 +69,13 @@ target_include_directories (Gloriaverb PRIVATE Source)
 file (GLOB GLORIAVERB_FONTS CONFIGURE_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Fonts/*.ttf"
       "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Fonts/*.otf")
+# The recordings behind Spring and Vintage Chamber (always built in).
+set (GLORIAVERB_IMPULSES
+     "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Impulses/spring.f32"
+     "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Impulses/chamber.f32")
+juce_add_binary_data (GloriaverbAssets SOURCES ${GLORIAVERB_FONTS} ${GLORIAVERB_IMPULSES})
+target_link_libraries (Gloriaverb PRIVATE GloriaverbAssets)
 if (GLORIAVERB_FONTS)
-    juce_add_binary_data (GloriaverbAssets SOURCES ${GLORIAVERB_FONTS})
-    target_link_libraries (Gloriaverb PRIVATE GloriaverbAssets)
     target_compile_definitions (Gloriaverb PRIVATE GLORIAVERB_HAS_FONTS=1)
 endif()
 

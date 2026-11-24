@@ -23,6 +23,10 @@ GloriaverbEditor::GloriaverbEditor (GloriaverbProcessor& p)
     synoptic.onSelect = [this] (int m) { showPanel (m); };
     addAndMakeVisible (synoptic);
 
+    onSwitch.attach (st, id::active);
+    onSwitch.setTooltip ("plugin on / bypass: off stops everything at once, tails included (alt-click to reset)");
+    addAndMakeVisible (onSwitch);
+
     // ---- Reverb ----
     modeSel = std::make_unique<ChoiceSelector> (*st.getParameter (id::mode), modeNames());
     modeSel->fontSize = 16.0f;
@@ -30,7 +34,7 @@ GloriaverbEditor::GloriaverbEditor (GloriaverbProcessor& p)
     addChildComponent (*modeSel);
     addChildComponent (*eraSel);
 
-    for (auto* f : { &timeFader, &predelayFader, &earlyFader, &gravityFader, &boingFader })
+    for (auto* f : { &timeFader, &predelayFader, &earlyFader, &gravityFader })
     {
         f->slider.onValueChange = [this] { repaint (panelArea); };
         addChildComponent (*f);
@@ -39,9 +43,18 @@ GloriaverbEditor::GloriaverbEditor (GloriaverbProcessor& p)
     predelayFader.attach (st, id::predelay);
     earlyFader.attach (st, id::early);
     gravityFader.attach (st, id::gravity);
-    boingFader.attach (st, id::boing);
     gravityFader.slider.setTooltip ("+100: normal decay; going down, the tail swells after each attack (alt-click to reset)");
-    boingFader.slider.setTooltip ("how much the spring boings on attacks (alt-click to reset)");
+    // Spring / Vintage Chamber: Time can shorten the recording, not make it longer
+    timeFader.slider.onValueChange = [this]
+    {
+        const int m = juce::roundToInt (value (params::id::mode));
+        if (gv::isConvolution (m) && timeFader.slider.isMouseButtonDown())
+        {
+            const double tn = (double) proc.naturalTime (m);
+            if (tn > 0.0 && timeFader.slider.getValue() > tn) timeFader.slider.setValue (tn, juce::sendNotificationSync);
+        }
+        repaint (panelArea);
+    };
 
     depth.attach (st, id::modDepth);
     rate.attach (st, id::modRate);
@@ -93,6 +106,7 @@ GloriaverbEditor::GloriaverbEditor (GloriaverbProcessor& p)
     for (size_t b = 0; b < 3; ++b)
         for (size_t k = 0; k < 3; ++k)
         {
+            if (k == 2 && b != 1) continue;   // bands 1 and 3 are shelves: no Q
             auto knob = std::make_unique<SketchKnob> (names[k], 44);
             knob->attach (st, k == 0 ? id::eqFreq[b] : (k == 1 ? id::eqGain[b] : id::eqQ[b]));
             addChildComponent (*knob);
@@ -142,9 +156,12 @@ void GloriaverbEditor::updateVisibility()
                                 (juce::Component*) &hiCut, (juce::Component*) &damping, (juce::Component*) &width,
                                 (juce::Component*) &mix, (juce::Component*) &soloWet, (juce::Component*) &filtersSwitch })
         c->setVisible (rv);
-    earlyFader.setVisible (rv && mode != (int) gv::Mode::glorious && mode != (int) gv::Mode::spring);
+    const bool conv = gv::isConvolution (mode);
+    earlyFader.setVisible (rv && mode != (int) gv::Mode::glorious);
+    earlyFader.setEnabled (! conv);
+    earlyFader.setAlpha (conv ? 0.3f : 1.0f);
+    earlyFader.slider.setTooltip (conv ? "no early reflections in the recordings" : "early ref (alt-click to reset)");
     gravityFader.setVisible (rv && mode == (int) gv::Mode::glorious);
-    boingFader.setVisible (rv && mode == (int) gv::Mode::spring);
 
     const bool sync = value (params::id::dSync) > 0.5f;
     for (juce::Component* c : { (juce::Component*) dTypeSel.get(), (juce::Component*) dStereoSel.get(),
@@ -156,12 +173,36 @@ void GloriaverbEditor::updateVisibility()
     eqCurve.setVisible (eqp);
     eqLoCut.setVisible (eqp);
     eqHiCut.setVisible (eqp);
-    for (auto& k : bandKnobs) k->setVisible (eqp);
+    for (auto& k : bandKnobs) if (k != nullptr) k->setVisible (eqp);
 
     const float cutAlpha = value (params::id::filtersOn) > 0.5f ? 1.0f : 0.45f;
     for (auto* k : { &loCut, &hiCut, &eqLoCut, &eqHiCut }) k->setAlpha (cutAlpha);
     const float eqAlpha = value (params::id::eqOn) > 0.5f ? 1.0f : 0.55f;
-    for (auto& k : bandKnobs) k->setAlpha (eqAlpha);
+    for (auto& k : bandKnobs) if (k != nullptr) k->setAlpha (eqAlpha);
+
+    // bypassed: everything but the header fades back
+    const bool on = value (params::id::active) > 0.5f;
+    if (on != shownOn)
+    {
+        shownOn = on;
+        repaint();
+    }
+}
+
+void GloriaverbEditor::paintOverChildren (juce::Graphics& g)
+{
+    // Spring / Vintage Chamber: the part of the Time fader above the recording is out of reach
+    const int mode = juce::roundToInt (value (params::id::mode));
+    if (panel == 1 && gv::isConvolution (mode))
+    {
+        const auto b = timeFader.getBounds();
+        const float y = (float) b.getY() + (float) timeFader.slider.getPositionOfValue ((double) proc.naturalTime (mode));
+        g.setColour (sketch::colour::paper.withAlpha (0.7f));
+        g.fillRect (juce::Rectangle<float> ((float) b.getX() - 2.0f, (float) b.getY() - 2.0f, (float) b.getWidth() + 4.0f, y - (float) b.getY() - 6.0f));
+    }
+    if (shownOn) return;
+    g.setColour (sketch::colour::paper.withAlpha (0.6f));
+    g.fillRect (getLocalBounds().withTrimmedTop (synArea.getY() - 6));
 }
 
 void GloriaverbEditor::timerCallback()
@@ -169,7 +210,7 @@ void GloriaverbEditor::timerCallback()
     using namespace params;
     double sig = 0.0;
     int k = 1;
-    for (const char* pid : { id::mode, id::filtersOn, id::dSync, id::order, id::delayOn, id::reverbOn, id::eqOn,
+    for (const char* pid : { id::active, id::mode, id::filtersOn, id::dSync, id::order, id::delayOn, id::reverbOn, id::eqOn,
                              id::loCut, id::hiCut, id::eqFreq[0], id::eqFreq[1], id::eqFreq[2],
                              id::eqGain[0], id::eqGain[1], id::eqGain[2], id::eqQ[0], id::eqQ[1], id::eqQ[2],
                              id::dType, id::dStereo, id::dNote })
@@ -186,6 +227,7 @@ void GloriaverbEditor::timerCallback()
 void GloriaverbEditor::resized()
 {
     synoptic.setBounds (synArea);
+    onSwitch.setBounds (W - 22 - 80, 38, 80, 30);
 
     // ---- Reverb ----
     const int px = panelArea.getX() + 16, py = panelArea.getY() + 12;
@@ -201,7 +243,6 @@ void GloriaverbEditor::resized()
         x += colW;
     }
     gravityFader.setBounds (earlyFader.getBounds());
-    boingFader.setBounds (earlyFader.getBounds());
 
     const auto right = juce::Rectangle<int> (faderBox.getRight() + 16, faderBox.getY(),
                                              panelArea.getRight() - 16 - (faderBox.getRight() + 16), faderBox.getHeight());
@@ -264,9 +305,11 @@ void GloriaverbEditor::resized()
         for (int b = 0; b < 3; ++b)
         {
             const auto col = eqCols[(size_t) b + 1];
+            const int count = b == 1 ? 3 : 2;   // shelves: Freq and Gain only
             const int kw2 = (col.getWidth() - 8) / 3;
-            for (int k = 0; k < 3; ++k)
-                bandKnobs[(size_t) (b * 3 + k)]->setBounds (col.getX() + 4 + k * kw2, col.getY() + 34, kw2, kh2);
+            const int x0 = col.getX() + (col.getWidth() - count * kw2) / 2;
+            for (int k = 0; k < count; ++k)
+                bandKnobs[(size_t) (b * 3 + k)]->setBounds (x0 + k * kw2, col.getY() + 34, kw2, kh2);
         }
     }
 
@@ -293,7 +336,7 @@ void GloriaverbEditor::valuePill (juce::Graphics& g, const juce::String& text, j
 }
 
 void GloriaverbEditor::drawFader (juce::Graphics& g, SketchFader& f, const juce::String& label,
-                                  std::initializer_list<std::pair<float, const char*>> ticks)
+                                  std::initializer_list<std::pair<float, const char*>> ticks, const juce::String& shown)
 {
     const auto b = f.getBounds();
     const int cx = b.getCentreX();
@@ -310,7 +353,7 @@ void GloriaverbEditor::drawFader (juce::Graphics& g, SketchFader& f, const juce:
         g.drawText (t.second, juce::Rectangle<float> ((float) b.getX() - 50.0f, y - 8.0f, 46.0f, 16.0f),
                     juce::Justification::centredRight, false);
     }
-    valuePill (g, f.valueText(), { (float) cx, (float) faderBox.getBottom() - 26.0f }, seedOf (label) + 5);
+    valuePill (g, shown.isNotEmpty() ? shown : f.valueText(), { (float) cx, (float) faderBox.getBottom() - 26.0f }, seedOf (label) + 5);
 }
 
 void GloriaverbEditor::paint (juce::Graphics& g)
@@ -330,7 +373,7 @@ void GloriaverbEditor::paint (juce::Graphics& g)
     }
     g.setColour (colour::soft);
     g.setFont (fonts->hand (15.0f));
-    g.drawText ("Planet Gloria", juce::Rectangle<int> (W - 22 - 250, 26, 250, 22), juce::Justification::centredRight, false);
+    g.drawText ("Planet Gloria", juce::Rectangle<int> (W - 22 - 250, 12, 250, 22), juce::Justification::centredRight, false);
 
     // ---- panel ----
     box (g, panelArea.toFloat(), 151, colour::knob, 2.0f);
@@ -354,15 +397,22 @@ void GloriaverbEditor::paintReverb (juce::Graphics& g)
 
     box (g, faderBox.toFloat(), 101, colour::tint.withAlpha (0.45f), 2.0f);
     const int mode = juce::roundToInt (value (params::id::mode));
-    drawFader (g, timeFader, mode == (int) gv::Mode::nonLin ? juce::String (juce::CharPointer_UTF8 ("Time \xc2\xb7 gate")) : "Time",
-               { { 60.0f, "60 s" }, { 12.0f, "12 s" }, { 2.4f, "2.4 s" }, { 0.5f, "0.5 s" }, { 0.1f, "0.1 s" } });
+    if (gv::isConvolution (mode))
+    {
+        // the recording sets the longest Time: shown as "max"
+        const float tn = proc.naturalTime (mode);
+        drawFader (g, timeFader, "Time", { { tn, "max" }, { 0.5f, "0.5 s" }, { 0.1f, "0.1 s" } },
+                   params::fmtTime (juce::jmin ((float) timeFader.slider.getValue(), tn), 0));
+    }
+    else
+        drawFader (g, timeFader, mode == (int) gv::Mode::nonLin ? juce::String (juce::CharPointer_UTF8 ("Time \xc2\xb7 gate")) : "Time",
+                   { { 60.0f, "60 s" }, { 12.0f, "12 s" }, { 2.4f, "2.4 s" }, { 0.5f, "0.5 s" }, { 0.1f, "0.1 s" } });
     drawFader (g, predelayFader, "Predelay", { { 250.0f, "250 ms" }, { 125.0f, "125 ms" }, { 0.0f, "0 ms" } });
     if (mode == (int) gv::Mode::glorious)
         drawFader (g, gravityFader, "Gravity", { { 100.0f, "+100" }, { 0.0f, "0" }, { -100.0f, "-100" } });
-    else if (mode == (int) gv::Mode::spring)
-        drawFader (g, boingFader, "Boiiing!!", { { 100.0f, "100%" }, { 50.0f, "50%" }, { 0.0f, "0%" } });
     else
-        drawFader (g, earlyFader, "Early Ref", { { 100.0f, "100%" }, { 50.0f, "50%" }, { 0.0f, "0%" } });
+        drawFader (g, earlyFader, "Early Ref", { { 100.0f, "100%" }, { 50.0f, "50%" }, { 0.0f, "0%" } },
+                   gv::isConvolution (mode) ? juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x94")) : juce::String());
 
     for (const auto& gr : groups)
     {

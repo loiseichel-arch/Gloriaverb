@@ -144,7 +144,7 @@ private:
 };
 
 // ===========================================================================
-// EQ: three bells (Freq, Gain, Q).
+// EQ: low shelf (Freq, Gain), bell (Freq, Gain, Q), high shelf (Freq, Gain).
 
 class Eq3
 {
@@ -156,7 +156,7 @@ public:
         std::array<float, 3> q      { 0.9f, 0.9f, 0.9f };
     };
 
-    void prepare (double sampleRate) { fs = sampleRate; last.gainDb[0] = 999.0f; set (prm); reset(); }
+    void prepare (double sampleRate) { fs = sampleRate; last.gainDb = { 999.0f, 999.0f, 999.0f }; set (prm); reset(); }
     void reset() { for (auto& c : bq) for (auto& b : c) b.reset(); }
 
     void set (const Params& p)
@@ -165,12 +165,13 @@ public:
         for (int b = 0; b < 3; ++b)
         {
             const auto i = (size_t) b;
-            if (same (p.freq[i], last.freq[i]) && same (p.gainDb[i], last.gainDb[i]) && same (p.q[i], last.q[i])) continue;
+            if (same (p.freq[i], last.freq[i]) && same (p.gainDb[i], last.gainDb[i]) && (b != 1 || same (p.q[i], last.q[i]))) continue;
             for (int c = 0; c < 2; ++c)
             {
                 // keep the filter state: only the coefficients change
                 const float z1 = bq[c][b].z1, z2 = bq[c][b].z2;
-                bq[c][b].setPeak (fs, p.freq[i], p.gainDb[i], std::max (0.1f, p.q[i]));
+                if (b == 1) bq[c][b].setPeak (fs, p.freq[i], p.gainDb[i], std::max (0.1f, p.q[i]));
+                else        bq[c][b].setShelf (fs, p.freq[i], p.gainDb[i], b == 2);   // band 1 low shelf, band 3 high shelf (no Q)
                 bq[c][b].z1 = z1; bq[c][b].z2 = z2;
             }
         }
@@ -187,7 +188,7 @@ public:
         }
     }
 
-    // Linear magnitude at f (all three bells), for the curve.
+    // Linear magnitude at f (all three bands), for the curve.
     double magnitude (double f) const
     {
         double m = 1.0;
@@ -217,6 +218,7 @@ public:
         rel = timeCoef (fs, 0.3);
         gain = 1.0f;
     }
+    void reset() { env.env = 0.0f; gain = 1.0f; }
     void set (float amount, float releaseMs)
     {
         amt = std::clamp (amount, 0.0f, 1.0f);

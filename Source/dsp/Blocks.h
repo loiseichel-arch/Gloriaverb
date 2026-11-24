@@ -100,6 +100,21 @@ struct Biquad
         a1 = b1; a2 = (float) ((1.0 - al / A) / a0);
         active = std::abs (gainDb) > 0.01;
     }
+    // Shelves (RBJ, slope 1: no Q), gain in dB.
+    void setShelf (double fs, double fc, double gainDb, bool high)
+    {
+        fc = std::min (fc, 0.45 * fs);
+        const double A = std::pow (10.0, gainDb / 40.0), sA = std::sqrt (A);
+        const double w = 2.0 * 3.14159265358979 * fc / fs, c = std::cos (w), al = std::sin (w) / 2.0 * std::sqrt (2.0);
+        const double sg = high ? -1.0 : 1.0;   // high shelf: the cosine terms flip
+        const double a0 = (A + 1.0) + sg * (A - 1.0) * c + 2.0 * sA * al;
+        b0 = (float) (A * ((A + 1.0) - sg * (A - 1.0) * c + 2.0 * sA * al) / a0);
+        b1 = (float) (sg * 2.0 * A * ((A - 1.0) - sg * (A + 1.0) * c) / a0);
+        b2 = (float) (A * ((A + 1.0) - sg * (A - 1.0) * c - 2.0 * sA * al) / a0);
+        a1 = (float) (-sg * 2.0 * ((A - 1.0) + sg * (A + 1.0) * c) / a0);
+        a2 = (float) (((A + 1.0) + sg * (A - 1.0) * c - 2.0 * sA * al) / a0);
+        active = std::abs (gainDb) > 0.01;
+    }
     // Magnitude (linear) at frequency f, for drawing curves.
     double magnitude (double fs, double f) const
     {

@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <array>
 #include <atomic>
+#include <mutex>
 #include "dsp/ReverbEngine.h"
 #include "dsp/Modules.h"
 #include "Parameters.h"
@@ -43,14 +44,17 @@ public:
     double eqMagnitude (double hz) const;
     double currentSampleRate() const { return sr; }
     double currentBpm() const { return bpm.load(); }
+    // Longest Time of a mode (Spring / Vintage Chamber: the length of the recording).
+    float naturalTime (int mode) const { return reverb.naturalTime (mode); }
 
 private:
     gv::Settings readReverb() const;
     void readModules();
+    void clearEverything();
 
     struct Raw
     {
-        std::atomic<float> *mode, *era, *time, *predelay, *early, *gravity, *boing, *modDepth, *modRate,
+        std::atomic<float> *active, *mode, *era, *time, *predelay, *early, *gravity, *modDepth, *modRate,
                            *filtersOn, *loCut, *hiCut, *damping, *width, *mix, *soloWet,
                            *order, *delayOn, *reverbOn, *eqOn,
                            *dType, *dStereo, *dSync, *dTime, *dNote, *dFeedback, *dMix,
@@ -70,6 +74,8 @@ private:
     juce::SmoothedValue<float> dryGain, wetGain, outGain;
     std::array<float, 3> moduleMix { 0.0f, 1.0f, 0.0f };   // on/off fades of Delay, Reverb, EQ
     float orderFade = 1.0f;
+    float onGain = 1.0f;             // On / bypass: 5 ms fade, then everything is cleared
+    bool cleared = false;
     int currentOrder = 0, pendingOrder = -1;
     double sr = 44100.0;
     std::atomic<double> bpm { 120.0 };

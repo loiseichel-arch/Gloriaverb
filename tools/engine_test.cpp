@@ -1,14 +1,17 @@
-// Offline test of the Gloriaverb DSP (no JUCE).
+// Offline test of the Gloriaverb DSP (no JUCE). Run it from the repository
+// root (it reads the impulses in Assets/Impulses):
 //   g++ -O2 -std=c++17 -I Source tools/engine_test.cpp -o engine_test && ./engine_test
 // Reverb: decay times vs Time, Damping tilt, level and stereo of each mode,
 // Width loudness, the Filters switch, noise floor per era, 60 s stability,
-// Non-lin gate, Glorious gravity, Spring chirp, mode change clicks, CPU.
-// Modules: Delay (time, feedback, stereo modes), EQ, Duck, Destroy.
+// Non-lin gate, Glorious gravity, convolution (exactness against a direct
+// convolution, no latency, Time / Damping on the recordings), mode change
+// clicks, CPU. Modules: Delay, EQ (shelves and bell), Duck, Destroy.
 
 #include "dsp/ReverbEngine.h"
 #include "dsp/Modules.h"
 #include <chrono>
 #include <cstdio>
+#include <fstream>
 #include <algorithm>
 #include <utility>
 #include <vector>
@@ -24,7 +27,22 @@ static const int block = 256;
 static bool ok = true;
 static void check (bool cond, const char* what) { if (! cond) { ok = false; std::printf ("  !! FAILED: %s\n", what); } }
 
-static const char* modeName (int m) { static const char* n[] = { "Plate 140", "Plate 250", "Hall", "Room", "Non-lin", "Glorious", "Spring" }; return n[m]; }
+static const char* modeName (int m) { static const char* n[] = { "Plate 140", "Plate 250", "Hall", "Room", "Non-lin", "Glorious", "Spring", "V.Chamber" }; return n[m]; }
+
+static std::shared_ptr<const ImpulseSource> impulses[2];
+
+static std::shared_ptr<const ImpulseSource> loadImpulse (const char* path, int channels)
+{
+    std::ifstream f (path, std::ios::binary | std::ios::ate);
+    if (! f) { std::printf ("  !! cannot read %s (run from the repository root)\n", path); return {}; }
+    const size_t bytes = (size_t) f.tellg();
+    std::vector<float> data (bytes / sizeof (float));
+    f.seekg (0);
+    f.read (reinterpret_cast<char*> (data.data()), (std::streamsize) bytes);
+    return std::make_shared<const ImpulseSource> (makeImpulseSource (data.data(), (int) (data.size() / (size_t) channels), channels, 96000.0));
+}
+
+static void attachImpulses (ReverbEngine& e) { for (int k = 0; k < 2; ++k) e.setImpulse (k, impulses[k]); }
 
 static void run (ReverbEngine& e, std::vector<float>& L, std::vector<float>& R)
 {
@@ -78,7 +96,9 @@ static Settings base (int mode, float t)
 
 static void render (const Settings& s, std::vector<float>& L, std::vector<float>& R)
 {
-    ReverbEngine e;
+    static ReverbEngine e;   // reused: the impulses are only built once
+    static bool first = true;
+    if (first) { attachImpulses (e); first = false; }
     e.setSettings (s);
     e.prepare (fs, block);
     e.setSettings (s);
@@ -117,6 +137,8 @@ int main()
     _MM_SET_FLUSH_ZERO_MODE (_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE (_MM_DENORMALS_ZERO_ON);
 #endif
+    impulses[0] = loadImpulse ("Assets/Impulses/spring.f32", 1);
+    impulses[1] = loadImpulse ("Assets/Impulses/chamber.f32", 2);
 
     std::printf ("== Decay time (Clean, no modulation, no damping): RT60 of the lows (< 400 Hz) vs Time x low multiplier ==\n");
     for (int m : { 0, 1, 2, 3, 5 })
@@ -143,7 +165,7 @@ int main()
     std::printf ("\n== Level and stereo of every mode (noise in, Time 2 s, Early 30 %%, wet only) ==\n");
     for (int m = 0; m < numModes; ++m)
     {
-        Settings s = base (m, 2.0f); s.modDepth = 0.3f; s.early = 0.3f; s.boing = 0.5f;
+        Settings s = base (m, 2.0f); s.modDepth = 0.3f; s.early = 0.3f;
         std::vector<float> L, R, iL, iR;
         pinkish (L, R, (size_t) (8 * fs));
         iL = L; iR = R;
@@ -190,21 +212,23 @@ int main()
     }
 
     std::printf ("\n== Noise floor with silence in (wet only, Plate 250) ==\n");
-    for (int era = 0; era < 3; ++era)
+    for (int era = 0; era < 2; ++era)
     {
         Settings s = base (1, 2.0f); s.era = era;
         std::vector<float> L ((size_t) (2 * fs), 0.0f), R (L.size(), 0.0f);
         render (s, L, R);
-        const char* nm[] = { "Vintage", "80s", "Clean" };
-        std::printf ("  %-7s : %6.1f dBFS RMS\n", nm[era], 10 * std::log10 (energy (L, L.size() / 2, L.size()) / (L.size() / 2) + 1e-30));
+        const char* nm[] = { "Vintage", "Clean" };
+        const double db = 10 * std::log10 (energy (L, L.size() / 2, L.size()) / (L.size() / 2) + 1e-30);
+        std::printf ("  %-7s : %6.1f dBFS RMS\n", nm[era], db);
+        check (db < -150.0, "no hiss: silence in, silence out");
     }
 
     std::printf ("\n== 60 s tails: stability (100 s after an impulse, every mode and era, full modulation) ==\n");
     for (int m = 0; m < numModes; ++m)
-        for (int era = 0; era < 3; ++era)
+        for (int era = 0; era < 2; ++era)
         {
             Settings s = base (m, 60.0f); s.era = era; s.modDepth = 1.0f; s.modRateHz = 5.0f; s.damping = 1.0f;
-            s.boing = 1.0f; s.gravity = -1.0f;
+            s.gravity = -1.0f;
             std::vector<float> L, R;
             impulse (s, 100.0, L, R);
             float peakLate = 0, peakEarly = 0; bool finite = true;
@@ -269,35 +293,91 @@ int main()
         if (gr == -1.0f) check (later > early, "gravity -100 swells");
     }
 
-    std::printf ("\n== Spring: chirp (lows arrive first, highs later, as in a real spring), Boiiing!! ==\n");
-    for (float b : { 0.0f, 0.5f, 1.0f })
+    std::printf ("\n== Convolution engine: against a direct convolution (synthetic 48 kHz impulse, 1.2 s, stereo) ==\n");
     {
-        Settings s = base (6, 2.0f); s.boing = b;
-        std::vector<float> L, R;
-        impulse (s, 3.0, L, R);
-        // narrow bands (RBJ band-pass, Q 4), centre of energy of the first pass (25-60 ms)
-        auto bandpass = [&] (const std::vector<float>& x, double f0)
+        const int len = (int) (1.2 * fs);
+        std::vector<float> data ((size_t) len * 2);
+        Rng r (11);
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i < len; ++i)
+                data[(size_t) (c * len + i)] = r.bipolar() * std::exp (-6.9f * (float) i / (float) len) * 0.05f;
+        ImpulseSource src = makeImpulseSource (data.data(), len, 2, fs);
+        ConvKernel k; buildKernel (k, src, fs);
+        Convolver cv; cv.prepare (k.length); cv.setKernel (&k);
+        const int n = (int) (1.6 * fs);
+        std::vector<float> x ((size_t) n), yl ((size_t) n), yr ((size_t) n);
+        Rng r2 (12);
+        for (int i = 0; i < n; ++i) x[(size_t) i] = i < (int) (0.3 * fs) ? 0.5f * r2.bipolar() : 0.0f;
+        for (int i = 0; i < n; ++i) cv.process (x[(size_t) i], yl[(size_t) i], yr[(size_t) i]);
+        double err = 0, ref = 0;
+        for (int i = 0; i < n; i += 7)   // a sample every 7 is plenty
         {
-            const double w = 2 * 3.14159265 * f0 / fs, al = std::sin (w) / 8.0, a0 = 1 + al;
-            const double b0 = al / a0, b2 = -al / a0, a1 = -2 * std::cos (w) / a0, a2 = (1 - al) / a0;
-            std::vector<float> y (x.size()); double z1 = 0, z2 = 0;
-            for (size_t i = 0; i < x.size(); ++i) { const double o = b0 * x[i] + z1; z1 = -a1 * o + z2; z2 = b2 * x[i] - a2 * o; y[i] = (float) o; }
-            return y;
-        };
-        auto centre = [&] (const std::vector<float>& x)
+            double dl = 0, dr = 0;
+            for (int j = 0; j < len && j <= i; ++j)
+            {
+                if (i - j >= (int) (0.3 * fs)) continue;
+                dl += (double) data[(size_t) j] * x[(size_t) (i - j)];
+                dr += (double) data[(size_t) (len + j)] * x[(size_t) (i - j)];
+            }
+            err += (dl - yl[(size_t) i]) * (dl - yl[(size_t) i]) + (dr - yr[(size_t) i]) * (dr - yr[(size_t) i]);
+            ref += dl * dl + dr * dr;
+        }
+        const double edb = 10 * std::log10 (err / ref + 1e-30);
+        std::printf ("  error vs direct convolution: %.1f dB (taps %d, natural length %.2f s)\n", edb, k.length, k.naturalTime);
+        check (edb < -80.0, "convolution exact");
+        // no latency: an impulse comes out on the very first sample
+        Convolver c2; c2.prepare (k.length); c2.setKernel (&k);
+        float l0, r0; c2.process (1.0f, l0, r0);
+        std::printf ("  first output sample %.5f (first tap %.5f)\n", l0, data[0]);
+        check (std::fabs (l0 - data[0]) < 1e-6f, "convolution: no latency");
+    }
+
+    std::printf ("\n== Spring / Vintage Chamber: the recordings, Time and Damping ==\n");
+    for (int m : { 6, 7 })
+    {
+        ReverbEngine probe; attachImpulses (probe);
+        const float tn = probe.naturalTime (m);
+        std::printf ("  %-9s : natural length %.2f s\n", modeName (m), tn);
+        check (tn > 1.0f && tn < 10.0f, "impulse loaded");
+        for (float t : { 60.0f, 2.0f, 1.0f, 0.3f })
         {
-            double e = 0, t = 0;
-            for (size_t i = (size_t) (0.025 * fs); i < (size_t) (0.060 * fs); ++i) { e += x[i] * x[i]; t += (double) i * x[i] * x[i]; }
-            return t / std::max (1e-20, e) / fs * 1000.0;
-        };
-        auto lo = bandpass (L, 300), hi = bandpass (L, 2200);
-        std::printf ("  Boiiing!! %3.0f%% : 300 Hz at %.1f ms, 2.2 kHz at %.1f ms, RT60 %.2f s\n", b * 100, centre (lo), centre (hi), rt60 (L, R));
-        // how "echoey": peak / mean of the energy in 5 ms windows, 60 ms .. 600 ms
-        std::vector<double> win;
-        for (size_t i = (size_t) (0.06 * fs); i + 240 < (size_t) (0.6 * fs); i += 240) win.push_back (energy (L, i, i + 240));
-        double mx = 0, mean = 0; for (double v : win) { mx = std::max (mx, v); mean += v; } mean /= (double) win.size();
-        std::printf ("      echo peak/mean (lower = smoother) %.1f\n", mx / mean);
-        check (centre (hi) > centre (lo) + 4.0, "spring chirp: highs arrive later");
+            std::vector<float> L, R;
+            impulse (base (m, t), tn + 1.5, L, R);
+            // time to -60 dB on the energy decay curve
+            std::vector<double> edc (L.size() + 1, 0.0);
+            for (size_t i = L.size(); i-- > 0;) edc[i] = edc[i + 1] + (double) L[i] * L[i] + (double) R[i] * R[i];
+            size_t i60 = 0; while (i60 < L.size() && edc[i60] > edc[0] * 1e-6) ++i60;
+            const double t60 = (double) i60 / fs, want = std::min (t, tn);
+            double c = 0; for (size_t i = 0; i < L.size(); ++i) c += (double) L[i] * R[i];
+            std::printf ("      Time %4.1f s : -60 dB at %.2f s (expected about %.2f), L/R correlation %+.2f\n", t, t60, want, c / std::sqrt (energy (L, 0, L.size()) * energy (R, 0, R.size())));
+            check (std::fabs (t60 - want) < 0.2 * want + 0.05, "convolution: Time");
+        }
+        for (float d : { -1.0f, 1.0f })
+        {
+            Settings s = base (m, 1.5f); s.damping = d;
+            std::vector<float> L, R;
+            impulse (s, tn + 1.0, L, R);
+            // narrow bands (RBJ band-pass, Q 4): 200 Hz and 2.5 kHz
+            auto bandpass = [&] (const std::vector<float>& x, double f0)
+            {
+                const double w = 2 * 3.14159265 * f0 / fs, al = std::sin (w) / 8.0, a0 = 1 + al;
+                const double b0 = al / a0, b2 = -al / a0, a1 = -2 * std::cos (w) / a0, a2 = (1 - al) / a0;
+                std::vector<float> y (x.size()); double z1 = 0, z2 = 0;
+                for (size_t i = 0; i < x.size(); ++i) { const double o = b0 * x[i] + z1; z1 = -a1 * o + z2; z2 = b2 * x[i] - a2 * o; y[i] = (float) o; }
+                return y;
+            };
+            // early decay (0 to -10 dB, x 6): the narrow bands still leak a little of the other band later on
+            auto edt = [&] (const std::vector<float>& a, const std::vector<float>& b)
+            {
+                std::vector<double> e (a.size() + 1, 0.0);
+                for (size_t i = a.size(); i-- > 0;) e[i] = e[i + 1] + (double) a[i] * a[i] + (double) b[i] * b[i];
+                size_t i10 = 0; while (i10 < a.size() && e[i10] > e[0] * 0.1) ++i10;
+                return 6.0 * (double) i10 / fs;
+            };
+            const double lo = edt (bandpass (L, 200), bandpass (R, 200)), hi = edt (bandpass (L, 2500), bandpass (R, 2500));
+            std::printf ("      Time 1.5 s, Damping %+4.0f : lows %.2f s, highs %.2f s (early decay)\n", d * 100, lo, hi);
+            check (d > 0 ? lo < hi : hi < lo, "convolution: Damping");
+        }
     }
 
     std::printf ("\n== Modulation: pitch swing of a 1 kHz tone through the reverb (Clean, Rate 0.6 Hz, wet only) ==\n");
@@ -332,7 +412,7 @@ int main()
 
     std::printf ("\n== Mode changes while playing (every mode in turn): largest sample step ==\n");
     {
-        ReverbEngine e;
+        ReverbEngine e; attachImpulses (e);
         Settings s = base (0, 3.0f); s.modDepth = 0.3f;
         e.setSettings (s); e.prepare (fs, block); e.setSettings (s);
         const size_t n = (size_t) (8 * fs);
@@ -389,21 +469,22 @@ int main()
         check (std::fabs (DelayFx::noteMs (DelayFx::noteIndex ("1/8."), 120.0) - 375.0) < 0.01, "sync time");
     }
 
-    std::printf ("\n== EQ (bell +6 dB at 1 kHz, Q 1) ==\n");
+    std::printf ("\n== EQ: band 1 low shelf +6 dB at 200 Hz, band 2 bell -6 dB at 2 kHz (Q 1), band 3 high shelf +6 dB at 8 kHz ==\n");
     {
         Eq3 eq; eq.prepare (fs);
-        Eq3::Params p; p.freq = { 1000.0f, 1000.0f, 1000.0f }; p.gainDb = { 6.0f, 0.0f, 0.0f }; p.q = { 1.0f, 1.0f, 1.0f };
+        Eq3::Params p; p.freq = { 200.0f, 2000.0f, 8000.0f }; p.gainDb = { 6.0f, -6.0f, 6.0f }; p.q = { 5.0f, 1.0f, 5.0f };   // Q of the shelves is ignored
         eq.set (p);
-        for (double f : { 100.0, 1000.0, 10000.0 })
+        struct Pt { double f, want; } pts[] = { { 30.0, 6.0 }, { 200.0, 3.0 }, { 2000.0, -6.0 }, { 8000.0, 3.0 }, { 20000.0, 6.0 } };
+        for (const auto& pt : pts)
         {
             const size_t n = (size_t) fs;
             std::vector<float> L (n), R (n);
-            for (size_t i = 0; i < n; ++i) L[i] = R[i] = (float) std::sin (2 * 3.14159265 * f * (double) i / fs) * 0.25f;
+            for (size_t i = 0; i < n; ++i) L[i] = R[i] = (float) std::sin (2 * 3.14159265 * pt.f * (double) i / fs) * 0.25f;
             eq.reset();
             eq.process (L.data(), R.data(), (int) n);
-            const double g = std::sqrt (energy (L, n / 2, n) / (n / 2)) / (0.25 / std::sqrt (2.0));
-            std::printf ("  %6.0f Hz : %+5.2f dB (curve says %+5.2f dB)\n", f, 20 * std::log10 (g), 20 * std::log10 (eq.magnitude (f)));
-            if (f == 1000.0) check (std::fabs (20 * std::log10 (g) - 6.0) < 0.2, "eq gain");
+            const double g = 20 * std::log10 (std::sqrt (energy (L, n / 2, n) / (n / 2)) / (0.25 / std::sqrt (2.0)));
+            std::printf ("  %6.0f Hz : %+5.2f dB (curve says %+5.2f, expected about %+4.1f)\n", pt.f, g, 20 * std::log10 (eq.magnitude (pt.f)), pt.want);
+            check (std::fabs (g - pt.want) < 0.8, "eq bands");
         }
     }
 
@@ -457,9 +538,9 @@ int main()
         }
 
     std::printf ("\n== CPU (48 kHz stereo, reverb) ==\n");
-    for (int m : { 1, 5, 6 })
+    for (int m : { 1, 5, 6, 7 })
     {
-        ReverbEngine e;
+        ReverbEngine e; attachImpulses (e);
         Settings s = base (m, 4.0f); s.era = 0; s.modDepth = 1.0f; s.early = 0.5f; s.loCutHz = 100; s.hiCutHz = 9000;
         e.setSettings (s); e.prepare (fs, block); e.setSettings (s);
         const size_t n = (size_t) (10 * fs);

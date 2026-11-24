@@ -14,6 +14,8 @@ namespace params
 
 namespace id
 {
+    // Whole plugin
+    inline constexpr const char* active   = "active";    // On / bypass (hard stop)
     // Routing
     inline constexpr const char* order    = "order";
     inline constexpr const char* delayOn  = "delayOn";
@@ -26,7 +28,6 @@ namespace id
     inline constexpr const char* predelay = "predelay";
     inline constexpr const char* early    = "early";
     inline constexpr const char* gravity  = "gravity";   // Glorious
-    inline constexpr const char* boing    = "boing";     // Spring ("Boiiing!!")
     inline constexpr const char* modDepth = "modDepth";
     inline constexpr const char* modRate  = "modRate";
     inline constexpr const char* filtersOn= "filtersOn";
@@ -47,7 +48,7 @@ namespace id
     // EQ module
     inline constexpr std::array<const char*, 3> eqFreq { "eq1Freq", "eq2Freq", "eq3Freq" };
     inline constexpr std::array<const char*, 3> eqGain { "eq1Gain", "eq2Gain", "eq3Gain" };
-    inline constexpr std::array<const char*, 3> eqQ    { "eq1Q", "eq2Q", "eq3Q" };
+    inline constexpr std::array<const char*, 3> eqQ    { "eq1Q", "eq2Q", "eq3Q" };   // only band 2 (bands 1 and 3 are shelves)
     // Master
     inline constexpr const char* duck     = "duck";
     inline constexpr const char* release  = "release";
@@ -56,8 +57,9 @@ namespace id
 }
 
 // Stored as indexes: only add names at the end.
-inline juce::StringArray modeNames()   { return { "Plate 140", "Plate 250", "Hall", "Room", "Non-lin", "Glorious", "Spring" }; }
-inline juce::StringArray eraNames()    { return { "Vintage", "80s", "Clean" }; }
+inline juce::StringArray modeNames()   { return { "Plate 140", "Plate 250", "Hall", "Room", "Non-lin", "Glorious", "Spring", "Vintage Chamber" }; }
+// 0.3 had Vintage / 80s / Clean: 80s (1) and Clean (2) sessions open in Clean.
+inline juce::StringArray eraNames()    { return { "Vintage", "Clean" }; }
 inline juce::StringArray dTypeNames()  { return { "Digital", "Tape" }; }
 inline juce::StringArray dStereoNames(){ return { "Mono", "Wide", "Ping-pong" }; }
 inline juce::StringArray dSyncNames()  { return { "ms", "Sync" }; }
@@ -179,7 +181,6 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 
     // ---- new in 0.2 ----
     addFloat (id::gravity,  "Gravity",    NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 100.0f, fmtSigned, "");
-    addFloat (id::boing,    "Boiiing!!",  pct, 50.0f, fmtPct, "%");
     addBool  (id::filtersOn,"Filters On", true);
 
     addChoice (id::order,   "Order", orderNames(), 0);
@@ -207,6 +208,9 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     addFloat (id::duck,    "Duck",    pct, 0.0f, fmtDuck, "%");
     addFloat (id::release, "Release", logRange (20.0f, 3000.0f), 300.0f, fmtLongMs, "ms");
     addFloat (id::destroy, "Destroy", pct, 0.0f, fmtPct, "%");
+
+    // ---- new in 0.4 ----
+    addBool  (id::active,  "On",      true);
 
     return layout;
 }

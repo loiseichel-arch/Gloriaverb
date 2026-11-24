@@ -7,10 +7,11 @@
 //   -> input diffusion (4 allpasses per side)
 //   -> 16-line feedback delay network (Hadamard matrix), with per-line
 //      two-band decay (Time, Damping), modulation (Mod Depth / Rate) and,
-//      for the 80s / Vintage eras, 16-bit words inside the loop
-//      (Spring mode: a tank of three dispersive springs instead)
+//      for the Vintage era, 16-bit words inside the loop
+//      (Spring and Vintage Chamber: convolution with Loic's own recordings
+//      instead, Time and Damping shorten them, see Convolver.h)
 //   -> Non-lin gate / Glorious gravity envelope
-//   -> era output stage (bandwidth, converter, hiss)
+//   -> tail vibrato (Mod Depth) -> era output stage (bandwidth, converter)
 //   -> Lo Cut / Hi Cut (on/off switch) -> Width (constant loudness).
 //
 // Each mode is a set of line lengths, diffusion, tap pattern, modulation
@@ -20,26 +21,28 @@
 #pragma once
 
 #include "Blocks.h"
+#include "Convolver.h"
 
 namespace gv
 {
 
 // Order is stored in sessions: only add at the end.
-enum class Mode { plate140 = 0, plate250, hall, room, nonLin, glorious, spring };
-enum class Era  { vintage = 0, eighties, clean };
+enum class Mode { plate140 = 0, plate250, hall, room, nonLin, glorious, spring, vintageChamber };
+enum class Era  { vintage = 0, clean };   // (0.3 had Vintage / 80s / Clean: 80s sessions open in Clean)
 
-constexpr int numModes = 7;
+constexpr int numModes = 8;
 inline bool modeAvailable (int m) { return m >= 0 && m < numModes; }
+inline bool isConvolution (int m) { return m == (int) Mode::spring || m == (int) Mode::vintageChamber; }
+inline int  impulseIndex (int m)  { return m == (int) Mode::vintageChamber ? 1 : 0; }   // 0 Spring, 1 Vintage Chamber
 
 struct Settings
 {
     int   mode       = (int) Mode::plate250;
     int   era        = (int) Era::vintage;
-    float timeS      = 2.0f;     // 0.1 .. 60 s (decay to -60 dB; Non-lin: gate length)
+    float timeS      = 2.0f;     // 0.1 .. 60 s (decay to -60 dB; Non-lin: gate length; Spring / Chamber: up to the recording)
     float predelayMs = 0.0f;     // 0 .. 250 ms
     float early      = 0.3f;     // 0 .. 1  early reflections level
     float gravity    = 1.0f;     // -1 .. +1 (Glorious) + = normal decay, - = the tail swells
-    float boing      = 0.5f;     // 0 .. 1  (Spring) amount of chirp / drip
     float modDepth   = 0.3f;     // 0 .. 1
     float modRateHz  = 0.6f;     // 0.05 .. 5 Hz
     bool  filtersOn  = true;
@@ -131,138 +134,10 @@ inline const ModeDesign& designFor (int mode)
         case Mode::glorious: return glorious;
         case Mode::plate250:
         case Mode::spring:
-        default:             return plate250;   // also used to size things in Spring mode
+        case Mode::vintageChamber:
+        default:             return plate250;   // also used to size things in the convolution modes
     }
 }
-
-// ---------------------------------------------------------------------------
-// Spring tank, after the RE-201 Space Echo spring: dark, twangy, no wobble.
-// Three springs (left, right, centre) in parallel. Each spring is a loop:
-// delay line -> cascade of 100 stretched allpasses (a + z^-k) / (1 + a z^-k)
-// -> lowpass below the chirp frequency -> back into the delay. In a real
-// spring the lows travel faster than the highs, so every echo is a chirp
-// and each pass smears it further: that is what turns the echoes into the
-// "boing" instead of distinct repeats (Valimaki / Parker / Abel model).
-// A small tube-like preamp drives the tank; Boiiing!! pushes the attacks
-// into the springs and makes the chirps stronger.
-
-class SpringTank
-{
-public:
-    static constexpr int S = 3, M = 100, maxK = 16;
-
-    void prepare (double sampleRate)
-    {
-        fs = sampleRate;
-        k = std::clamp ((int) std::lround (fs / (2.0 * 3000.0)), 2, maxK);   // chirps up to about 3 kHz (a dark tank)
-        const double fc = fs / (2.0 * k);
-        const float ms[S] = { 27.3f, 31.9f, 36.7f };
-        for (int s = 0; s < S; ++s)
-        {
-            loop[s].setMaxSamples ((int) (0.050 * fs) + 64);
-            len[s] = (float) (ms[s] * 0.001 * fs);
-            for (int b = 0; b < 2; ++b) lpf[s][b].setLowpass (fs, fc * 0.85, b == 0 ? 0.5412 : 1.3066);   // 4th-order Butterworth
-        }
-        hpCoef = onePoleCoef (fs, 110.0);
-        emphCoef = onePoleCoef (fs, 1500.0);
-        toneLp[0].setLowpass (fs, 3500.0);   // the RE-201 tank is dark
-        toneLp[1].setLowpass (fs, 3500.0);
-        reset();
-    }
-
-    void reset()
-    {
-        for (int s = 0; s < S; ++s)
-        {
-            loop[s].clear();
-            for (int m = 0; m < M; ++m) for (int j = 0; j < maxK; ++j) xb[s][m][j] = yb[s][m][j] = 0.0f;
-            for (auto& f : lpf[s]) f.reset();
-            hp1[s] = hp2[s] = 0.0f;
-        }
-        toneLp[0].reset(); toneLp[1].reset();
-        emph[0] = emph[1] = 0.0f;
-        p = 0;
-        wob = wobTarget = 0.0f;
-    }
-
-    void set (float timeS, float boing, float damping, float modDepth, float modRate)
-    {
-        const float b = std::clamp (boing, 0.0f, 1.0f);
-        a = 0.55f + 0.20f * b;                                   // more dispersion = longer chirps
-        const float dcDelay = (float) (k * M) * (1.0f - a) / (1.0f + a);
-        const float t = std::clamp (timeS, 0.1f, 60.0f);
-        for (int s = 0; s < S; ++s)
-            g[s] = std::min (0.9995f, (float) std::exp (-6.907755 * (len[s] + dcDelay) / (t * fs)));
-        drive = 1.0f + 1.5f * b;                                 // attacks hit the springs harder
-        emphAmt = 2.5f * b;
-        const double fc = fs / (2.0 * k);
-        const double lp = std::clamp (fc * 0.85 * std::pow (2.0, 0.5 * std::clamp (damping, -1.0f, 1.0f)), 800.0, std::min (0.95 * fc, 0.45 * fs));
-        for (int s = 0; s < S; ++s)
-            for (int i = 0; i < 2; ++i) lpf[s][i].setLowpass (fs, lp, i == 0 ? 0.5412 : 1.3066);
-        // springs hardly move: the Mod knobs only shake the tank a little
-        wobDepth = std::clamp (modDepth, 0.0f, 1.0f) * (float) (0.0002 * fs);
-        wobRate = std::clamp (modRate, 0.02f, 10.0f);
-    }
-
-    void process (float inL, float inR, float& outL, float& outR)
-    {
-        // preamp: a little drive, then emphasis of the attacks (Boiiing!!)
-        float x[2] = { inL, inR };
-        for (int c = 0; c < 2; ++c)
-        {
-            emph[c] += emphCoef * (x[c] - emph[c]);
-            const float hi = x[c] - emph[c];
-            x[c] = std::tanh (drive * (x[c] + emphAmt * hi)) / drive;
-        }
-        const float in[S] = { x[0], x[1], 0.5f * (x[0] + x[1]) };
-
-        // tiny, smooth random shake of the tank
-        if (wobDepth > 0.0f)
-        {
-            wobPhase += wobRate / (float) fs;
-            if (wobPhase >= 1.0f) { wobPhase -= 1.0f; wobTarget = rng.bipolar(); }
-            wob += 0.0005f * (wobTarget - wob);
-        }
-
-        float y[S];
-        for (int s = 0; s < S; ++s)
-        {
-            const float d = std::max (3.0f, len[s] - wobDepth * (1.0f + wob * (s == 1 ? -1.0f : 1.0f)));
-            float v = loop[s].tapFrac (d);
-            for (int m = 0; m < M; ++m)
-            {
-                float& xk = xb[s][m][p];
-                float& yk = yb[s][m][p];
-                const float out = a * (v - yk) + xk;
-                xk = v;
-                yk = out;
-                v = out;
-            }
-            v = lpf[s][1].process (lpf[s][0].process (v));
-            hp1[s] += hpCoef * (v - hp1[s]);
-            v -= hp1[s];
-            hp2[s] += hpCoef * (v - hp2[s]);
-            v -= hp2[s];
-            y[s] = v;
-            loop[s].push (0.5f * in[s] + g[s] * v);
-        }
-        p = (p + 1) % k;
-
-        outL = toneLp[0].process (y[0] + 0.6f * y[2]);
-        outR = toneLp[1].process (y[1] - 0.6f * y[2]);
-    }
-
-private:
-    double fs = 48000.0;
-    int k = 6, p = 0;
-    DelayLine loop[S];
-    float xb[S][M][maxK] {}, yb[S][M][maxK] {};
-    Biquad lpf[S][2], toneLp[2];
-    float len[S] {}, g[S] {}, hp1[S] {}, hp2[S] {};
-    float a = 0.6f, drive = 1.0f, emphAmt = 0.0f, emph[2] {}, emphCoef = 0.1f, hpCoef = 0.01f;
-    float wob = 0.0f, wobTarget = 0.0f, wobPhase = 0.0f, wobDepth = 0.0f, wobRate = 0.6f;
-    Rng rng { 0x5EED5u };
-};
 
 // ---------------------------------------------------------------------------
 
@@ -271,10 +146,37 @@ class ReverbEngine
 public:
     static constexpr int N = 16;
 
+    // The recordings behind Spring (0) and Vintage Chamber (1). Set them
+    // before prepare(); without them those two modes are silent.
+    void setImpulse (int which, std::shared_ptr<const ImpulseSource> src)
+    {
+        if (which < 0 || which > 1) return;
+        sources[which] = std::move (src);
+        kernels[which].reset();
+    }
+
+    // Length of the recording (decay to -60 dB): the longest Time of that mode.
+    float naturalTime (int mode) const
+    {
+        if (! isConvolution (mode)) return 60.0f;
+        const auto& src = sources[impulseIndex (mode)];
+        return src != nullptr ? src->naturalTime : 0.0f;
+    }
+
     void prepare (double sampleRate, int maxBlock)
     {
         fs = sampleRate;
         (void) maxBlock;
+
+        // the impulses at this rate (heavy, only when the rate changes)
+        int maxTaps = 0;
+        for (int k = 0; k < 2; ++k)
+        {
+            if (sources[k] != nullptr && (kernels[k] == nullptr || std::fabs (kernels[k]->fs - fs) > 0.5))
+                kernels[k] = sharedKernel (sources[k], fs);
+            if (kernels[k] != nullptr && kernels[k]->valid) maxTaps = std::max (maxTaps, kernels[k]->length);
+        }
+        conv.prepare (maxTaps);
 
         for (auto& l : lines) l.setMaxSamples ((int) (0.215 * fs) + 64);   // longest Glorious line + modulation
         for (int s = 0; s < 2; ++s)
@@ -282,7 +184,6 @@ public:
             pre[s].setMaxSamples ((int) (0.340 * fs) + 8);   // predelay + early taps
             for (auto& a : diff[s]) a.d.setMaxSamples ((int) (0.020 * fs) + 8);
         }
-        spring.prepare (fs);
         for (auto& v : vib) v.setMaxSamples ((int) (0.020 * fs) + 16);
         modSmooth = 1.0f - timeCoef (fs, 0.03);
         adc.prepare (fs);
@@ -311,10 +212,9 @@ public:
             pre[s].clear();
             for (auto& a : diff[s]) a.d.clear();
             inLp[s].reset(); outLp[s].reset(); loCut[s].reset(); hiCut[s].reset();
-            hissLp[s] = 0.0f;
         }
         std::fill (std::begin (damp), std::end (damp), 0.0f);
-        spring.reset();
+        conv.reset();
         vib[0].clear(); vib[1].clear();
         for (int k = 0; k < N; ++k) modA[k] = modAT[k];
         vibA = vibAT;
@@ -335,8 +235,8 @@ public:
     // In-place stereo processing, wet only.
     void process (float* left, float* right, int n)
     {
-        const bool eraLoop16 = era != Era::clean;
-        const bool isSpring = current == (int) Mode::spring;
+        const bool eraLoop16 = era == Era::vintage;
+        const bool isConv = isConvolution (current);
         const bool isNonLin = current == (int) Mode::nonLin;
         const bool isGlorious = current == (int) Mode::glorious;
         const float filterStep = 1.0f / (0.010f * (float) fs);
@@ -367,8 +267,7 @@ public:
             if (satAmount > 0.0f) { xl = softSat (xl, satAmount); xr = softSat (xr, satAmount); }
             xl = inLp[0].process (xl);
             xr = inLp[1].process (xr);
-            if (era == Era::vintage)       adc.process (xl, xr);
-            else if (era == Era::eighties) { xl = quantize16 (xl); xr = quantize16 (xr); }
+            if (era == Era::vintage) adc.process (xl, xr);
 
             // ---- predelay ----
             pre[0].push (xl);
@@ -379,9 +278,9 @@ public:
 
             float wl = 0.0f, wr = 0.0f;
 
-            if (isSpring)
+            if (isConv)
             {
-                spring.process (pl, pr, wl, wr);
+                conv.process (0.5f * (pl + pr), wl, wr);   // mono in, stereo out
             }
             else
             {
@@ -485,15 +384,7 @@ public:
             // ---- era: output stage ----
             wl = outLp[0].process (wl);
             wr = outLp[1].process (wr);
-            if (era == Era::vintage)       dac.process (wl, wr);
-            else if (era == Era::eighties) { wl = quantize16 (wl); wr = quantize16 (wr); }
-            if (hissLevel > 0.0f)
-            {
-                hissLp[0] += 0.35f * (noise.bipolar() - hissLp[0]);
-                hissLp[1] += 0.35f * (noise.bipolar() - hissLp[1]);
-                wl += hissLevel * hissLp[0];
-                wr += hissLevel * hissLp[1];
-            }
+            if (era == Era::vintage) dac.process (wl, wr);
 
             // ---- Lo / Hi Cut, with an on/off switch (10 ms crossfade) ----
             const float ft = filtersOnTarget ? 1.0f : 0.0f;
@@ -556,6 +447,7 @@ private:
 
         dampCoef = onePoleCoef (fs, md.crossoverHz);
         lateGain = md.lateGain;
+        conv.setKernel (isConvolution (mode) ? kernels[impulseIndex (mode)].get() : nullptr);
 
         for (int k = 0; k < N + 2; ++k)
         {
@@ -573,7 +465,7 @@ private:
         if (current < 0) return;
         const ModeDesign& md = designFor (current);
 
-        era = (Era) std::clamp (s.era, 0, 2);
+        era = (Era) std::clamp (s.era, 0, 1);
         const bool isNonLin = current == (int) Mode::nonLin;
         const bool isGlorious = current == (int) Mode::glorious;
 
@@ -585,7 +477,7 @@ private:
             t = std::min (60.0f, t * 3.0f + 1.0f);
         }
         const float d = std::clamp (s.damping, -1.0f, 1.0f);
-        const float eraHigh = era == Era::vintage ? 0.72f : (era == Era::eighties ? 0.86f : 1.0f);
+        const float eraHigh = era == Era::vintage ? 0.72f : 1.0f;
         const float tLow  = t * md.lowMul  * std::pow (2.0f, -1.0f * d);
         const float tHigh = t * md.highMul * std::pow (2.0f,  1.2f * d) * eraHigh;
         for (int k = 0; k < N; ++k)
@@ -596,7 +488,7 @@ private:
 
         predelayTarget = (float) (std::clamp (s.predelayMs, 0.0f, 250.0f) * 0.001 * fs);
         if (force) predelayCur = predelayTarget;
-        const bool hasEarly = ! isGlorious && current != (int) Mode::spring;
+        const bool hasEarly = ! isGlorious && ! isConvolution (current);
         earlyGain = hasEarly ? std::clamp (s.early, 0.0f, 1.0f) : 0.0f;
         // Modulation, same scale in every mode. Inside the tank each line swings
         // by up to 4 ms (less in small rooms, and capped so the pitch never
@@ -626,8 +518,19 @@ private:
         const float swellTime = std::clamp (t * (gv < 0.0f ? 0.25f : 0.12f), 0.15f, 10.0f);
         swellRate = 1.0f - timeCoef (fs, swellTime);
 
-        if (current == (int) Mode::spring)
-            spring.set (std::min (60.0f, t * 1.2f), s.boing, d, s.modDepth, s.modRateHz);   // the tank filters shorten the tail a little: compensate
+        // Spring / Vintage Chamber: Time shortens the recording (it cannot make
+        // it longer); Damping shortens the lows (right) or the highs (left).
+        if (isConvolution (current))
+        {
+            const float tn = naturalTime (current);
+            if (tn > 0.0f)
+            {
+                const float te = std::min (t, tn);
+                const float tl = std::min (tn, te * std::pow (2.0f, -1.0f * d));
+                const float th = std::min (tn, te * std::pow (2.0f,  1.2f * d));
+                conv.setDecay (6.907755f * (1.0f / tl - 1.0f / tn), 6.907755f * (1.0f / th - 1.0f / tn));
+            }
+        }
 
         filtersOnTarget = s.filtersOn;
         loCutOn = s.loCutHz > 20.5f;
@@ -640,10 +543,9 @@ private:
 
         if (eraChanged || force)
         {
-            const double bw = era == Era::vintage ? 11000.0 : (era == Era::eighties ? 15000.0 : 1.0e9);
+            const double bw = era == Era::vintage ? 11000.0 : 1.0e9;
             for (int c = 0; c < 2; ++c) { inLp[c].setLowpass (fs, bw); outLp[c].setLowpass (fs, bw); }
-            satAmount = era == Era::vintage ? 0.7f : (era == Era::eighties ? 0.35f : 0.0f);
-            hissLevel = era == Era::vintage ? 4.0e-4f : (era == Era::eighties ? 6.0e-5f : 0.0f);   // about -79 / -95 dBFS
+            satAmount = era == Era::vintage ? 0.7f : 0.0f;
         }
     }
 
@@ -710,7 +612,9 @@ private:
     DelayLine lines[N];
     DelayLine pre[2];
     Allpass diff[2][4];
-    SpringTank spring;
+    std::shared_ptr<const ImpulseSource> sources[2];
+    std::shared_ptr<const ConvKernel> kernels[2];
+    Convolver conv;
     float baseLen[N] {}, gLow[N] {}, gHigh[N] {}, outSignL[N] {}, outSignR[N] {}, inSign[N] {};
     float damp[N] {};
     float dampCoef = 0.2f, lateGain = 0.6f, earlyGain = 0.3f, width = 1.0f, widthGain = 1.0f;
@@ -734,7 +638,7 @@ private:
     bool loCutOn = false, hiCutOn = false, filtersOnTarget = true;
     float filterMix = 1.0f;
     GainRangedConverter adc, dac;
-    float satAmount = 0.0f, hissLevel = 0.0f, hissLp[2] {};
+    float satAmount = 0.0f;
     Rng noise { 0xC0FFEEu };
 };
 

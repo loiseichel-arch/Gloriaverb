@@ -68,7 +68,7 @@ int main (int argc, char** argv)
     set (p, params::id::duck, 60); set (p, params::id::destroy, 50);
     set (p, params::id::eqGain[1], 6); set (p, params::id::dFeedback, 70);
     for (int o = 0; o < 6; ++o)
-        for (int m = 0; m < 7; ++m)
+        for (int m = 0; m < gv::numModes; ++m)
         {
             set (p, params::id::order, (float) o);
             set (p, params::id::mode, (float) m);
@@ -82,6 +82,41 @@ int main (int argc, char** argv)
     r = runAudio (p, 1.0);
     std::printf ("delay synced: peak %.3f, finite %s\n", r.first, r.second ? "yes" : "NO");
     ok = ok && r.second;
+
+    // On / bypass: a hard stop. After a sound, switch off: the output is the
+    // clean input (here silence) within a few ms, and switching back on
+    // brings nothing of the old tail back.
+    {
+        GloriaverbProcessor b;
+        b.setPlayConfigDetails (2, 2, 48000.0, 256);
+        b.prepareToPlay (48000.0, 256);
+        set (b, params::id::mode, 7); set (b, params::id::soloWet, 1); set (b, params::id::delayOn, 1);
+        juce::AudioBuffer<float> buf (2, 256);
+        juce::MidiBuffer midi;
+        auto blockPeak = [&] { return std::max (buf.getMagnitude (0, 0, 256), buf.getMagnitude (1, 0, 256)); };
+        for (int k = 0; k < 40; ++k)
+        {
+            buf.clear();
+            if (k < 4) for (int i = 0; i < 256; ++i) buf.setSample (0, i, 0.5f), buf.setSample (1, i, 0.5f);
+            b.processBlock (buf, midi);
+        }
+        const float before = blockPeak();
+        set (b, params::id::active, 0);
+        float afterOff = 0.0f;
+        for (int k = 0; k < 4; ++k) { buf.clear(); b.processBlock (buf, midi); if (k >= 1) afterOff = std::max (afterOff, blockPeak()); }
+        // a tone while off comes out untouched
+        for (int i = 0; i < 256; ++i) { buf.setSample (0, i, 0.25f * (float) std::sin (0.05 * i)); buf.setSample (1, i, -0.1f); }
+        juce::AudioBuffer<float> ref (buf);
+        b.processBlock (buf, midi);
+        float diff = 0.0f;
+        for (int c = 0; c < 2; ++c) for (int i = 0; i < 256; ++i) diff = std::max (diff, std::abs (buf.getSample (c, i) - ref.getSample (c, i)));
+        set (b, params::id::active, 1);
+        float afterOn = 0.0f;
+        for (int k = 0; k < 20; ++k) { buf.clear(); b.processBlock (buf, midi); afterOn = std::max (afterOn, blockPeak()); }
+        std::printf ("on / bypass: tail before %.4f, after off %.6f, off = clean input (max diff %.6f), back on %.6f\n",
+                     before, afterOff, diff, afterOn);
+        ok = ok && before > 0.001f && afterOff == 0.0f && diff == 0.0f && afterOn == 0.0f;
+    }
 
     // pictures: defaults of each panel, then a few values moved
     GloriaverbProcessor q;
@@ -105,6 +140,18 @@ int main (int argc, char** argv)
         q.apvts.state.setProperty ("panel", panel, nullptr);
         std::unique_ptr<juce::AudioProcessorEditor> ed (q.createEditor());
         save (*ed, out + "/gv_" + names[panel] + "_changed.png");
+    }
+    // Vintage Chamber with Time above the recording, then bypassed
+    set (q, params::id::mode, 7); set (q, params::id::time, 10.0f);
+    q.apvts.state.setProperty ("panel", 1, nullptr);
+    {
+        std::unique_ptr<juce::AudioProcessorEditor> ed (q.createEditor());
+        save (*ed, out + "/gv_reverb_chamber.png");
+    }
+    set (q, params::id::active, 0);
+    {
+        std::unique_ptr<juce::AudioProcessorEditor> ed (q.createEditor());
+        save (*ed, out + "/gv_bypassed.png");
     }
     return ok ? 0 : 1;
 }

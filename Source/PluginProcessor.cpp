@@ -1,5 +1,29 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "BinaryData.h"
+
+namespace
+{
+    // The recordings (96 kHz float32, channels one after the other), built
+    // in by CMake from Assets/Impulses. Read once, shared by every instance.
+    std::shared_ptr<const gv::ImpulseSource> impulse (int which)
+    {
+        static std::shared_ptr<const gv::ImpulseSource> cache[2];
+        static std::mutex lock;
+        const std::lock_guard<std::mutex> g (lock);
+        if (cache[which] == nullptr)
+        {
+            const char* data = which == 0 ? BinaryData::spring_f32 : BinaryData::chamber_f32;
+            const int bytes = which == 0 ? BinaryData::spring_f32Size : BinaryData::chamber_f32Size;
+            const int channels = which == 0 ? 1 : 2;
+            std::vector<float> f ((size_t) bytes / sizeof (float));
+            std::memcpy (f.data(), data, f.size() * sizeof (float));
+            cache[which] = std::make_shared<const gv::ImpulseSource> (
+                gv::makeImpulseSource (f.data(), (int) (f.size() / (size_t) channels), channels, 96000.0));
+        }
+        return cache[which];
+    }
+}
 
 GloriaverbProcessor::GloriaverbProcessor()
     : AudioProcessor (BusesProperties()
@@ -9,10 +33,11 @@ GloriaverbProcessor::GloriaverbProcessor()
 {
     using namespace params;
     auto p = [this] (const char* pid) { return apvts.getRawParameterValue (pid); };
+    raw.active = p (id::active);
     raw.mode = p (id::mode);           raw.era = p (id::era);
     raw.time = p (id::time);           raw.predelay = p (id::predelay);
     raw.early = p (id::early);         raw.gravity = p (id::gravity);
-    raw.boing = p (id::boing);         raw.modDepth = p (id::modDepth);
+    raw.modDepth = p (id::modDepth);
     raw.modRate = p (id::modRate);     raw.filtersOn = p (id::filtersOn);
     raw.loCut = p (id::loCut);         raw.hiCut = p (id::hiCut);
     raw.damping = p (id::damping);     raw.width = p (id::width);
@@ -32,6 +57,7 @@ GloriaverbProcessor::GloriaverbProcessor()
         raw.eqQ[b]    = p (id::eqQ[b]);
     }
     eqView.prepare (48000.0);
+    for (int k = 0; k < 2; ++k) reverb.setImpulse (k, impulse (k));
 }
 
 bool GloriaverbProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -51,7 +77,6 @@ gv::Settings GloriaverbProcessor::readReverb() const
     s.predelayMs = raw.predelay->load();
     s.early      = raw.early->load() * 0.01f;
     s.gravity    = raw.gravity->load() * 0.01f;
-    s.boing      = raw.boing->load() * 0.01f;
     s.modDepth   = raw.modDepth->load() * 0.01f;
     s.modRateHz  = raw.modRate->load();
     s.filtersOn  = raw.filtersOn->load() > 0.5f;
@@ -128,6 +153,17 @@ void GloriaverbProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     currentOrder = juce::jlimit (0, 5, juce::roundToInt (raw.order->load()));
     pendingOrder = -1;
     orderFade = 1.0f;
+    onGain = raw.active->load() > 0.5f ? 1.0f : 0.0f;
+    cleared = false;
+}
+
+void GloriaverbProcessor::clearEverything()
+{
+    reverb.reset();
+    delay.reset();
+    eq.reset();
+    ducker.reset();
+    destroyer.reset();
 }
 
 double GloriaverbProcessor::getTailLengthSeconds() const
@@ -153,6 +189,18 @@ void GloriaverbProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     reverb.setSettings (readReverb());
     readModules();
 
+    // ---- On / bypass: a hard stop. 5 ms fade, then the tails are cleared ----
+    const bool on = raw.active->load() > 0.5f;
+    if (! on && onGain <= 0.0f)
+    {
+        if (! cleared) { clearEverything(); cleared = true; }
+        if (inCh == 1 && outCh > 1) buffer.copyFrom (1, 0, buffer, 0, 0, n);
+        else if (inCh > 1 && outCh == 1) { buffer.addFrom (0, 0, buffer, 1, 0, n); buffer.applyGain (0, 0, n, 0.5f); }
+        for (auto* sm : { &dryGain, &wetGain, &outGain }) sm->skip (n);
+        return;
+    }
+    cleared = false;
+
     // stereo inside (a mono input feeds both sides)
     for (int c = 0; c < 2; ++c)
     {
@@ -172,6 +220,7 @@ void GloriaverbProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
 
     const bool onTarget[3] = { raw.delayOn->load() > 0.5f, raw.reverbOn->load() > 0.5f, raw.eqOn->load() > 0.5f };
     const float fadeStep = (float) (1.0 / (0.010 * sr));
+    const float onStep = (float) (1.0 / (0.005 * sr));
 
     auto* L = work.getWritePointer (0);
     auto* R = work.getWritePointer (1);
@@ -239,9 +288,15 @@ void GloriaverbProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         else if (orderFade < 1.0f) orderFade = juce::jmin (1.0f, orderFade + fadeStep);
 
         const float g = outGain.getNextValue() * orderFade;
-        if (outR != nullptr) { outL[i] = L[i] * g; outR[i] = R[i] * g; }
-        else                 { outL[i] = 0.5f * (L[i] + R[i]) * g; }
+        // On / bypass crossfade with the clean input
+        if (on ? onGain < 1.0f : onGain > 0.0f)
+            onGain = on ? juce::jmin (1.0f, onGain + onStep) : juce::jmax (0.0f, onGain - onStep);
+        const float dl = key.getSample (0, i), dr = key.getSample (1, i);
+        const float yl = dl + onGain * (L[i] * g - dl), yr = dr + onGain * (R[i] * g - dr);
+        if (outR != nullptr) { outL[i] = yl; outR[i] = yr; }
+        else                 { outL[i] = 0.5f * (yl + yr); }
     }
+    if (! on && onGain <= 0.0f) { clearEverything(); cleared = true; }   // nothing rings on afterwards
 }
 
 juce::AudioProcessorEditor* GloriaverbProcessor::createEditor() { return new GloriaverbEditor (*this); }
